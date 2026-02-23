@@ -10,8 +10,10 @@ import (
 )
 
 var (
-	topPortsMu    sync.Mutex
-	topPortsCache = map[int][]int{}
+	topPortsMu           sync.Mutex
+	topPortsCache        = map[int][]int{}
+	fallbackTopPortsOnce sync.Once
+	fallbackTopPorts     []int
 )
 
 func getTop1000Ports() []int {
@@ -36,10 +38,7 @@ func getTopNPorts(n int) []int {
 
 	ports := loadTopPortsFromNmapServices(n)
 	if len(ports) == 0 {
-		ports = make([]int, n)
-		for i := 1; i <= n; i++ {
-			ports[i-1] = i
-		}
+		ports = getFallbackTopPorts(n)
 	}
 
 	topPortsMu.Lock()
@@ -48,6 +47,82 @@ func getTopNPorts(n int) []int {
 
 	out := make([]int, len(ports))
 	copy(out, ports)
+	return out
+}
+
+func getFallbackTopPorts(n int) []int {
+	if n <= 0 {
+		return nil
+	}
+	fallbackTopPortsOnce.Do(func() {
+		fallbackTopPorts = parsePortSpec(defaultFallbackTopPortsSpec)
+	})
+	if len(fallbackTopPorts) == 0 {
+		out := make([]int, n)
+		for i := 1; i <= n; i++ {
+			out[i-1] = i
+		}
+		return out
+	}
+	if n <= len(fallbackTopPorts) {
+		out := make([]int, n)
+		copy(out, fallbackTopPorts[:n])
+		return out
+	}
+
+	out := make([]int, 0, n)
+	out = append(out, fallbackTopPorts...)
+	seen := make(map[int]struct{}, len(out))
+	for _, p := range out {
+		seen[p] = struct{}{}
+	}
+	for p := 1; p <= 65535 && len(out) < n; p++ {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func parsePortSpec(spec string) []int {
+	parts := strings.Split(spec, ",")
+	out := make([]int, 0, len(parts))
+	seen := make(map[int]struct{}, len(parts))
+	for _, raw := range parts {
+		tok := strings.TrimSpace(raw)
+		if tok == "" {
+			continue
+		}
+		if strings.Contains(tok, "-") {
+			bounds := strings.SplitN(tok, "-", 2)
+			if len(bounds) != 2 {
+				continue
+			}
+			start, errA := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			end, errB := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if errA != nil || errB != nil || start <= 0 || end <= 0 || start > end || end > 65535 {
+				continue
+			}
+			for p := start; p <= end; p++ {
+				if _, ok := seen[p]; ok {
+					continue
+				}
+				seen[p] = struct{}{}
+				out = append(out, p)
+			}
+			continue
+		}
+		p, err := strconv.Atoi(tok)
+		if err != nil || p <= 0 || p > 65535 {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
 	return out
 }
 

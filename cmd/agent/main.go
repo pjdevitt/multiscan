@@ -21,7 +21,9 @@ import (
 func main() {
 	agentID := envOrDefault("AGENT_ID", "agent-1")
 	serverURL := envOrDefault("SERVER_URL", "http://localhost:8080")
+	clientKey := envOrDefault("CLIENT_KEY", "")
 	wsURL := envOrDefault("WS_URL", serverToWSURL(serverURL))
+	wsURL = appendClientKeyToURL(wsURL, clientKey)
 	heartbeatURL := envOrDefault("HEARTBEAT_URL", serverToHeartbeatURL(serverURL))
 	heartbeatInterval := envDurationOrDefault("HEARTBEAT_INTERVAL", 5*time.Second)
 	wsReadTimeout := envDurationOrDefault("WS_READ_TIMEOUT", 40*time.Second)
@@ -33,14 +35,14 @@ func main() {
 	log.Printf("agent %s connecting websocket %s", agentID, wsURL)
 
 	for {
-		if err := runSession(agentID, wsURL, heartbeatURL, heartbeatInterval, wsReadTimeout, wsWriteTimeout, heartbeatClient, &completion); err != nil {
+		if err := runSession(agentID, wsURL, heartbeatURL, clientKey, heartbeatInterval, wsReadTimeout, wsWriteTimeout, heartbeatClient, &completion); err != nil {
 			log.Printf("websocket session error: %v", err)
 			time.Sleep(retryDelay)
 		}
 	}
 }
 
-func runSession(agentID, wsURL, heartbeatURL string, heartbeatInterval, wsReadTimeout, wsWriteTimeout time.Duration, heartbeatClient *http.Client, completion **protocol.JobCompletion) error {
+func runSession(agentID, wsURL, heartbeatURL, clientKey string, heartbeatInterval, wsReadTimeout, wsWriteTimeout time.Duration, heartbeatClient *http.Client, completion **protocol.JobCompletion) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -98,7 +100,7 @@ func runSession(agentID, wsURL, heartbeatURL string, heartbeatInterval, wsReadTi
 		} else {
 			log.Printf("received %s attempt %d/%d: %s-%s ports %d-%d", job.ID, job.Attempts, job.MaxAttempts, job.StartIP, job.EndIP, job.StartPort, job.EndPort)
 		}
-		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, agentID, job.ID, heartbeatInterval)
+		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, clientKey, agentID, job.ID, heartbeatInterval)
 		scanCfg := scanner.Config{Timeout: 600 * time.Millisecond, Concurrency: 256}
 		var (
 			results []protocol.ScanResult
@@ -122,7 +124,7 @@ func runSession(agentID, wsURL, heartbeatURL string, heartbeatInterval, wsReadTi
 	}
 }
 
-func startHeartbeat(client *http.Client, heartbeatURL, agentID, jobID string, interval time.Duration) func() {
+func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, interval time.Duration) func() {
 	if interval <= 0 || heartbeatURL == "" {
 		return func() {}
 	}
@@ -133,14 +135,14 @@ func startHeartbeat(client *http.Client, heartbeatURL, agentID, jobID string, in
 		once.Do(func() { close(stopCh) })
 	}
 
-	sendHeartbeat(client, heartbeatURL, agentID, jobID)
+	sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID)
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				sendHeartbeat(client, heartbeatURL, agentID, jobID)
+				sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID)
 			case <-stopCh:
 				return
 			}
@@ -149,7 +151,7 @@ func startHeartbeat(client *http.Client, heartbeatURL, agentID, jobID string, in
 	return stop
 }
 
-func sendHeartbeat(client *http.Client, heartbeatURL, agentID, jobID string) {
+func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string) {
 	reqBody, err := json.Marshal(protocol.HeartbeatRequest{
 		AgentID:      agentID,
 		CurrentJobID: jobID,
@@ -158,7 +160,16 @@ func sendHeartbeat(client *http.Client, heartbeatURL, agentID, jobID string) {
 		log.Printf("heartbeat marshal error: %v", err)
 		return
 	}
-	resp, err := client.Post(heartbeatURL, "application/json", bytes.NewReader(reqBody))
+	req, err := http.NewRequest(http.MethodPost, heartbeatURL, bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("heartbeat request build error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if clientKey != "" {
+		req.Header.Set("X-Client-Key", clientKey)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("heartbeat post error: %v", err)
 		return
@@ -216,6 +227,20 @@ func serverToHeartbeatURL(serverURL string) string {
 	u.Path = "/heartbeat"
 	u.RawQuery = ""
 	u.Fragment = ""
+	return u.String()
+}
+
+func appendClientKeyToURL(rawURL, clientKey string) string {
+	if clientKey == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("client_key", clientKey)
+	u.RawQuery = q.Encode()
 	return u.String()
 }
 

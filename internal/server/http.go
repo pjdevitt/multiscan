@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,15 +20,16 @@ var ipv4Pattern = regexp.MustCompile(`^((25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\.){3}
 
 // API serves the controller endpoints.
 type API struct {
-	store       *Store
-	syncMaxWait time.Duration
+	store             *Store
+	syncMaxWait       time.Duration
+	requiredClientKey string
 }
 
-func NewAPI(store *Store, syncMaxWait time.Duration) *API {
+func NewAPI(store *Store, syncMaxWait time.Duration, requiredClientKey string) *API {
 	if syncMaxWait <= 0 {
 		syncMaxWait = 25 * time.Second
 	}
-	return &API{store: store, syncMaxWait: syncMaxWait}
+	return &API{store: store, syncMaxWait: syncMaxWait, requiredClientKey: strings.TrimSpace(requiredClientKey)}
 }
 
 func (a *API) Routes() http.Handler {
@@ -110,6 +112,10 @@ func (a *API) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	if !a.authorizeAgentRequest(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
 
 	var req protocol.SyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -127,6 +133,10 @@ func (a *API) handleSync(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !a.authorizeAgentRequest(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
@@ -147,6 +157,10 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !a.authorizeAgentRequest(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
@@ -287,6 +301,17 @@ func normalizeSubmitRequest(req protocol.SubmitJobRequest) protocol.SubmitJobReq
 		req.EndPort = dedup[len(dedup)-1]
 	}
 	return req
+}
+
+func (a *API) authorizeAgentRequest(r *http.Request) bool {
+	if a.requiredClientKey == "" {
+		return true
+	}
+	provided := strings.TrimSpace(r.Header.Get("X-Client-Key"))
+	if provided == "" {
+		provided = strings.TrimSpace(r.URL.Query().Get("client_key"))
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(a.requiredClientKey)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

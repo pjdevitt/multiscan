@@ -131,29 +131,35 @@ func (s *Store) CreateJobs(req protocol.SubmitJobRequest) (protocol.Job, []proto
 			chunks = append(chunks, rangeToPorts(pr.start, pr.end))
 		}
 	}
-	subJobs := make([]protocol.Job, 0, len(chunks))
-	for _, chunk := range chunks {
-		id := fmt.Sprintf("job-%04d", s.nextID)
-		s.nextID++
-		startPort, endPort := minMaxPorts(chunk)
-		job := protocol.Job{
-			ID:          id,
-			ParentJobID: parentID,
-			StartIP:     req.StartIP,
-			EndIP:       req.EndIP,
-			StartPort:   startPort,
-			EndPort:     endPort,
-			Ports:       append([]int(nil), chunk...),
-			PortCount:   len(chunk),
-			Status:      protocol.JobQueued,
-			Attempts:    0,
-			MaxAttempts: maxAttempts,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+	targetIPs, err := enumerateIPv4Range(req.StartIP, req.EndIP)
+	if err != nil {
+		return protocol.Job{}, nil, err
+	}
+	subJobs := make([]protocol.Job, 0, len(chunks)*len(targetIPs))
+	for _, ip := range targetIPs {
+		for _, chunk := range chunks {
+			id := fmt.Sprintf("job-%04d", s.nextID)
+			s.nextID++
+			startPort, endPort := minMaxPorts(chunk)
+			job := protocol.Job{
+				ID:          id,
+				ParentJobID: parentID,
+				StartIP:     ip,
+				EndIP:       ip,
+				StartPort:   startPort,
+				EndPort:     endPort,
+				Ports:       append([]int(nil), chunk...),
+				PortCount:   len(chunk),
+				Status:      protocol.JobQueued,
+				Attempts:    0,
+				MaxAttempts: maxAttempts,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			s.jobs[id] = job
+			s.order = append(s.order, id)
+			subJobs = append(subJobs, job)
 		}
-		s.jobs[id] = job
-		s.order = append(s.order, id)
-		subJobs = append(subJobs, job)
 	}
 
 	if err := s.saveLocked(); err != nil {
@@ -1111,6 +1117,40 @@ func splitPortRanges(startPort, endPort, chunkSize int) []portRange {
 		out = append(out, portRange{start: p, end: end})
 	}
 	return out
+}
+
+func enumerateIPv4Range(start, end string) ([]string, error) {
+	startAddr, err := netip.ParseAddr(start)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start IP: %w", err)
+	}
+	endAddr, err := netip.ParseAddr(end)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end IP: %w", err)
+	}
+	if !startAddr.Is4() || !endAddr.Is4() {
+		return nil, fmt.Errorf("only IPv4 ranges are supported")
+	}
+	startN := ipv4ToUint32(startAddr)
+	endN := ipv4ToUint32(endAddr)
+	if startN > endN {
+		return nil, fmt.Errorf("start IP must be <= end IP")
+	}
+	out := make([]string, 0, int(endN-startN)+1)
+	for i := startN; i <= endN; i++ {
+		out = append(out, uint32ToIPv4(i).String())
+	}
+	return out, nil
+}
+
+func ipv4ToUint32(addr netip.Addr) uint32 {
+	b := addr.As4()
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
+
+func uint32ToIPv4(i uint32) netip.Addr {
+	b := [4]byte{byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i)}
+	return netip.AddrFrom4(b)
 }
 
 func splitPortList(ports []int, chunkSize int) [][]int {

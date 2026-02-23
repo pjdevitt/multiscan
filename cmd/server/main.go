@@ -15,6 +15,7 @@ func main() {
 	legacyStateFile := envOrDefault("LEGACY_STATE_FILE", "./data/state.json")
 	leaseDuration := envDurationOrDefault("LEASE_DURATION", 2*time.Minute)
 	syncWait := envDurationOrDefault("SYNC_WAIT", 25*time.Second)
+	requiredClientKey := envOrDefault("REQUIRED_CLIENT_KEY", "")
 
 	store, err := server.NewStore(server.Config{
 		DBPath:          dbPath,
@@ -25,11 +26,16 @@ func main() {
 		log.Fatalf("failed to initialize store: %v", err)
 	}
 
-	api := server.NewAPI(store, syncWait)
+	api := server.NewAPI(store, syncWait, requiredClientKey)
 
 	log.Printf("controller listening on %s", addr)
 	log.Printf("sqlite db: %s", dbPath)
 	log.Printf("legacy json import source: %s", legacyStateFile)
+	if requiredClientKey != "" {
+		log.Printf("agent client-key auth: enabled")
+	} else {
+		log.Printf("agent client-key auth: disabled")
+	}
 	log.Printf("lease duration: %s, sync wait: %s", leaseDuration, syncWait)
 	if err := http.ListenAndServe(addr, api.Routes()); err != nil {
 		log.Fatalf("server failed: %v", err)

@@ -23,6 +23,9 @@ MultiScan is a distributed TCP scanner with two components:
   - Agent maintains a persistent `/ws` connection.
   - Agent sends `SyncRequest` messages (optionally carrying completion from prior job).
   - Server replies with next work or wait instruction.
+- Optional client-key auth for agents:
+  - Set `REQUIRED_CLIENT_KEY` on server to require agent authentication.
+  - Agents send `CLIENT_KEY` on `/ws`, `/sync`, and `/heartbeat`.
 - In-task heartbeat:
   - While scanning, agents post periodic heartbeats to `/heartbeat`.
   - Dashboard `last_seen` updates during long-running scans.
@@ -38,7 +41,8 @@ MultiScan is a distributed TCP scanner with two components:
   - Submit with `top_1000=true` to scan a top-1000 TCP port list (nmap-style).
   - Or submit with `top_n=<N>` to scan top-N ports (e.g. `5000`), which is split into 1024-port sub-jobs.
   - Jobs can carry explicit `ports[]`; agents consume that list directly.
-  - If `/usr/share/nmap/nmap-services` is available, top ports are derived from it; otherwise fallback is ports `1..N`.
+  - If `/usr/share/nmap/nmap-services` is available, top ports are derived from it.
+  - If unavailable, server uses a built-in explicit fallback top-ports list (the nmap-style sequence you provided), then fills additional ports only if `top_n` exceeds that list size.
 - Built-in server UI:
   - Open `http://localhost:8080/` to submit jobs and monitor agents/jobs in real time.
   - Use the `View` button on a job row to see open-port results ordered by IP then port.
@@ -61,6 +65,7 @@ MultiScan is a distributed TCP scanner with two components:
 SERVER_ADDR=:8080 \
 DB_PATH=./data/state.db \
 LEGACY_STATE_FILE=./data/state.json \
+REQUIRED_CLIENT_KEY=change-me \
 LEASE_DURATION=2m \
 SYNC_WAIT=25s \
 go run ./cmd/server
@@ -70,6 +75,12 @@ go run ./cmd/server
 
 ```bash
 AGENT_ID=agent-a SERVER_URL=http://localhost:8080 go run ./cmd/agent
+```
+
+With client-key auth enabled on server:
+
+```bash
+AGENT_ID=agent-a SERVER_URL=http://localhost:8080 CLIENT_KEY=change-me go run ./cmd/agent
 ```
 
 Optional explicit websocket URL override:
@@ -141,6 +152,46 @@ curl -s -X POST http://localhost:8080/jobs \
 ```bash
 curl -s http://localhost:8080/work/job-0001
 ```
+
+## Docker (Server)
+
+Build image:
+
+```bash
+docker build -t multiscan-server:latest .
+```
+
+Run server with persistent state on mounted volume:
+
+```bash
+docker run -d --name multiscan-server \
+  -p 8080:8080 \
+  -v multiscan-data:/data \
+  -e DB_PATH=/data/state.db \
+  -e LEGACY_STATE_FILE=/data/state.json \
+  -e REQUIRED_CLIENT_KEY=change-me \
+  multiscan-server:latest
+```
+
+Using a host bind mount instead of a named volume:
+
+```bash
+mkdir -p ./multiscan-data
+docker run -d --name multiscan-server \
+  -p 8080:8080 \
+  -v "$(pwd)/multiscan-data:/data" \
+  -e DB_PATH=/data/state.db \
+  -e LEGACY_STATE_FILE=/data/state.json \
+  -e REQUIRED_CLIENT_KEY=change-me \
+  multiscan-server:latest
+```
+
+Notes:
+
+- `DB_PATH` should point inside the mounted `/data` path, otherwise DB state is ephemeral.
+- First startup can import a legacy JSON state file from `LEGACY_STATE_FILE` if present.
+- Container includes the `sqlite3` CLI required by the server storage backend.
+- If `REQUIRED_CLIENT_KEY` is set, agents must provide matching `CLIENT_KEY`.
 
 ## API summary
 
