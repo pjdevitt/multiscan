@@ -23,13 +23,21 @@ type API struct {
 	store             *Store
 	syncMaxWait       time.Duration
 	requiredClientKey string
+	uiBasicAuthUser   string
+	uiBasicAuthPass   string
 }
 
-func NewAPI(store *Store, syncMaxWait time.Duration, requiredClientKey string) *API {
+func NewAPI(store *Store, syncMaxWait time.Duration, requiredClientKey, uiBasicAuthUser, uiBasicAuthPass string) *API {
 	if syncMaxWait <= 0 {
 		syncMaxWait = 25 * time.Second
 	}
-	return &API{store: store, syncMaxWait: syncMaxWait, requiredClientKey: strings.TrimSpace(requiredClientKey)}
+	return &API{
+		store:             store,
+		syncMaxWait:       syncMaxWait,
+		requiredClientKey: strings.TrimSpace(requiredClientKey),
+		uiBasicAuthUser:   strings.TrimSpace(uiBasicAuthUser),
+		uiBasicAuthPass:   uiBasicAuthPass,
+	}
 }
 
 func (a *API) Routes() http.Handler {
@@ -59,6 +67,9 @@ func (a *API) handleJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAPIJobs(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeUIRequest(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string][]protocol.JobListItem{"jobs": a.store.ListJobs()})
@@ -70,6 +81,9 @@ func (a *API) handleAPIJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAPIAgents(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeUIRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -233,6 +247,9 @@ func (a *API) processSync(req protocol.SyncRequest) (protocol.SyncResponse, int,
 }
 
 func (a *API) handleWorkByID(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeUIRequest(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -312,6 +329,26 @@ func (a *API) authorizeAgentRequest(r *http.Request) bool {
 		provided = strings.TrimSpace(r.URL.Query().Get("client_key"))
 	}
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(a.requiredClientKey)) == 1
+}
+
+func (a *API) authorizeUIRequest(w http.ResponseWriter, r *http.Request) bool {
+	if a.uiBasicAuthUser == "" || a.uiBasicAuthPass == "" {
+		return true
+	}
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Basic realm="multiscan-ui"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(user), []byte(a.uiBasicAuthUser)) == 1
+	passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(a.uiBasicAuthPass)) == 1
+	if !userOK || !passOK {
+		w.Header().Set("WWW-Authenticate", `Basic realm="multiscan-ui"`)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

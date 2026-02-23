@@ -26,6 +26,9 @@ MultiScan is a distributed TCP scanner with two components:
 - Optional client-key auth for agents:
   - Set `REQUIRED_CLIENT_KEY` on server to require agent authentication.
   - Agents send `CLIENT_KEY` on `/ws`, `/sync`, and `/heartbeat`.
+- Optional UI basic auth:
+  - Set `UI_BASIC_AUTH_USER` and `UI_BASIC_AUTH_PASS` on server.
+  - Protects browser/UI endpoints: `/`, `/api/jobs`, `/api/agents`, `/work/{jobID}`.
 - In-task heartbeat:
   - While scanning, agents post periodic heartbeats to `/heartbeat`.
   - Dashboard `last_seen` updates during long-running scans.
@@ -66,6 +69,8 @@ SERVER_ADDR=:8080 \
 DB_PATH=./data/state.db \
 LEGACY_STATE_FILE=./data/state.json \
 REQUIRED_CLIENT_KEY=change-me \
+UI_BASIC_AUTH_USER=admin \
+UI_BASIC_AUTH_PASS=change-me-ui-pass \
 LEASE_DURATION=2m \
 SYNC_WAIT=25s \
 go run ./cmd/server
@@ -170,6 +175,8 @@ docker run -d --name multiscan-server \
   -e DB_PATH=/data/state.db \
   -e LEGACY_STATE_FILE=/data/state.json \
   -e REQUIRED_CLIENT_KEY=change-me \
+  -e UI_BASIC_AUTH_USER=admin \
+  -e UI_BASIC_AUTH_PASS=change-me-ui-pass \
   multiscan-server:latest
 ```
 
@@ -183,6 +190,8 @@ docker run -d --name multiscan-server \
   -e DB_PATH=/data/state.db \
   -e LEGACY_STATE_FILE=/data/state.json \
   -e REQUIRED_CLIENT_KEY=change-me \
+  -e UI_BASIC_AUTH_USER=admin \
+  -e UI_BASIC_AUTH_PASS=change-me-ui-pass \
   multiscan-server:latest
 ```
 
@@ -192,6 +201,7 @@ Notes:
 - First startup can import a legacy JSON state file from `LEGACY_STATE_FILE` if present.
 - Container includes the `sqlite3` CLI required by the server storage backend.
 - If `REQUIRED_CLIENT_KEY` is set, agents must provide matching `CLIENT_KEY`.
+- If `UI_BASIC_AUTH_USER` and `UI_BASIC_AUTH_PASS` are set, browser UI access requires basic auth credentials.
 
 ## API summary
 
