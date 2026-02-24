@@ -1,19 +1,21 @@
 package server
 
 import (
-	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"multiscan/internal/protocol"
 )
@@ -53,6 +55,7 @@ type Store struct {
 	results       map[string][]protocol.ScanResult
 	agents        map[string]agentRecord
 	nextID        int
+	db            *sql.DB
 	dbPath        string
 	legacyState   string
 	leaseDuration time.Duration
@@ -87,10 +90,24 @@ func NewStore(cfg Config) (*Store, error) {
 		legacyState:   cfg.LegacyStateFile,
 		leaseDuration: cfg.LeaseDuration,
 	}
+	db, err := sql.Open("sqlite", cfg.DBPath)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping sqlite database: %w", err)
+	}
+	s.db = db
 	if err := s.initSQLite(); err != nil {
+		_ = s.db.Close()
 		return nil, err
 	}
 	if err := s.load(); err != nil {
+		_ = s.db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -504,100 +521,110 @@ func (s *Store) load() error {
 }
 
 func (s *Store) loadFromRelationalLocked() (bool, error) {
-	type countRow struct {
-		N int `json:"n"`
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM jobs;").Scan(&count); err != nil {
+		return false, fmt.Errorf("count jobs: %w", err)
 	}
-	countRows, err := queryRows[countRow](s, "SELECT COUNT(*) AS n FROM jobs;")
-	if err != nil {
-		return false, err
-	}
-	if len(countRows) == 0 || countRows[0].N == 0 {
+	if count == 0 {
 		return false, nil
 	}
 
-	type jobRow struct {
-		ID             string  `json:"id"`
-		ParentJobID    *string `json:"parent_job_id"`
-		StartIP        string  `json:"start_ip"`
-		EndIP          string  `json:"end_ip"`
-		StartPort      int     `json:"start_port"`
-		EndPort        int     `json:"end_port"`
-		PortsJSON      *string `json:"ports_json"`
-		PortCount      int     `json:"port_count"`
-		Status         string  `json:"status"`
-		AssignedTo     *string `json:"assigned_to"`
-		Attempts       int     `json:"attempts"`
-		MaxAttempts    int     `json:"max_attempts"`
-		LeaseExpiresAt *string `json:"lease_expires_at"`
-		LastError      *string `json:"last_error"`
-		CreatedAt      string  `json:"created_at"`
-		UpdatedAt      string  `json:"updated_at"`
-	}
-	jobRows, err := queryRows[jobRow](s, "SELECT id,parent_job_id,start_ip,end_ip,start_port,end_port,ports_json,port_count,status,assigned_to,attempts,max_attempts,lease_expires_at,last_error,created_at,updated_at FROM jobs;")
+	jobRows, err := s.db.Query("SELECT id,parent_job_id,start_ip,end_ip,start_port,end_port,ports_json,port_count,status,assigned_to,attempts,max_attempts,lease_expires_at,last_error,created_at,updated_at FROM jobs;")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("query jobs: %w", err)
 	}
-	for _, r := range jobRows {
-		createdAt, err := parseTime(r.CreatedAt)
+	defer jobRows.Close()
+	for jobRows.Next() {
+		var id string
+		var parentJobID sql.NullString
+		var startIP string
+		var endIP string
+		var startPort int
+		var endPort int
+		var portsJSON sql.NullString
+		var portCount int
+		var status string
+		var assignedTo sql.NullString
+		var attempts int
+		var maxAttempts int
+		var leaseExpiresAt sql.NullString
+		var lastError sql.NullString
+		var createdAtRaw string
+		var updatedAtRaw string
+		if err := jobRows.Scan(
+			&id, &parentJobID, &startIP, &endIP, &startPort, &endPort, &portsJSON, &portCount,
+			&status, &assignedTo, &attempts, &maxAttempts, &leaseExpiresAt, &lastError, &createdAtRaw, &updatedAtRaw,
+		); err != nil {
+			return false, fmt.Errorf("scan jobs row: %w", err)
+		}
+		createdAt, err := parseTime(createdAtRaw)
 		if err != nil {
 			return false, err
 		}
-		updatedAt, err := parseTime(r.UpdatedAt)
+		updatedAt, err := parseTime(updatedAtRaw)
 		if err != nil {
 			return false, err
 		}
 		var lease *time.Time
-		if r.LeaseExpiresAt != nil && *r.LeaseExpiresAt != "" {
-			t, err := parseTime(*r.LeaseExpiresAt)
+		if leaseExpiresAt.Valid && strings.TrimSpace(leaseExpiresAt.String) != "" {
+			t, err := parseTime(leaseExpiresAt.String)
 			if err != nil {
 				return false, err
 			}
 			lease = &t
 		}
 		job := protocol.Job{
-			ID:             r.ID,
-			StartIP:        r.StartIP,
-			EndIP:          r.EndIP,
-			StartPort:      r.StartPort,
-			EndPort:        r.EndPort,
-			PortCount:      r.PortCount,
-			Status:         protocol.JobStatus(r.Status),
-			Attempts:       r.Attempts,
-			MaxAttempts:    r.MaxAttempts,
+			ID:             id,
+			StartIP:        startIP,
+			EndIP:          endIP,
+			StartPort:      startPort,
+			EndPort:        endPort,
+			PortCount:      portCount,
+			Status:         protocol.JobStatus(status),
+			Attempts:       attempts,
+			MaxAttempts:    maxAttempts,
 			LeaseExpiresAt: lease,
 			CreatedAt:      createdAt,
 			UpdatedAt:      updatedAt,
 		}
-		if r.PortsJSON != nil && strings.TrimSpace(*r.PortsJSON) != "" {
+		if portsJSON.Valid && strings.TrimSpace(portsJSON.String) != "" {
 			var ports []int
-			if err := json.Unmarshal([]byte(*r.PortsJSON), &ports); err == nil {
+			if err := json.Unmarshal([]byte(portsJSON.String), &ports); err == nil {
 				job.Ports = ports
 			}
 		}
 		if job.PortCount == 0 {
 			job.PortCount = portCountForJob(job.StartPort, job.EndPort, job.Ports)
 		}
-		if r.ParentJobID != nil {
-			job.ParentJobID = *r.ParentJobID
+		if parentJobID.Valid {
+			job.ParentJobID = parentJobID.String
 		}
-		if r.AssignedTo != nil {
-			job.AssignedTo = *r.AssignedTo
+		if assignedTo.Valid {
+			job.AssignedTo = assignedTo.String
 		}
-		if r.LastError != nil {
-			job.LastError = *r.LastError
+		if lastError.Valid {
+			job.LastError = lastError.String
 		}
 		s.jobs[job.ID] = job
 	}
+	if err := jobRows.Err(); err != nil {
+		return false, fmt.Errorf("iterate jobs rows: %w", err)
+	}
 
-	type orderRow struct {
-		JobID string `json:"job_id"`
-	}
-	orderRows, err := queryRows[orderRow](s, "SELECT job_id FROM job_order ORDER BY position ASC;")
+	orderRows, err := s.db.Query("SELECT job_id FROM job_order ORDER BY position ASC;")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("query job_order: %w", err)
 	}
-	for _, r := range orderRows {
-		s.order = append(s.order, r.JobID)
+	defer orderRows.Close()
+	for orderRows.Next() {
+		var jobID string
+		if err := orderRows.Scan(&jobID); err != nil {
+			return false, fmt.Errorf("scan job_order row: %w", err)
+		}
+		s.order = append(s.order, jobID)
+	}
+	if err := orderRows.Err(); err != nil {
+		return false, fmt.Errorf("iterate job_order rows: %w", err)
 	}
 	if len(s.order) == 0 {
 		for id := range s.jobs {
@@ -606,63 +633,70 @@ func (s *Store) loadFromRelationalLocked() (bool, error) {
 		sort.Strings(s.order)
 	}
 
-	type resultRow struct {
-		JobID string  `json:"job_id"`
-		IP    string  `json:"ip"`
-		Port  int     `json:"port"`
-		Open  int     `json:"open"`
-		Err   *string `json:"err"`
-	}
-	resultRows, err := queryRows[resultRow](s, "SELECT job_id,ip,port,open,err FROM results ORDER BY job_id,ip,port;")
+	resultRows, err := s.db.Query("SELECT job_id,ip,port,open,err FROM results ORDER BY job_id,ip,port;")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("query results: %w", err)
 	}
-	for _, r := range resultRows {
-		sr := protocol.ScanResult{IP: r.IP, Port: r.Port, Open: r.Open != 0}
-		if r.Err != nil {
-			sr.Err = *r.Err
+	defer resultRows.Close()
+	for resultRows.Next() {
+		var jobID string
+		var ip string
+		var port int
+		var open int
+		var errMsg sql.NullString
+		if err := resultRows.Scan(&jobID, &ip, &port, &open, &errMsg); err != nil {
+			return false, fmt.Errorf("scan results row: %w", err)
 		}
-		s.results[r.JobID] = append(s.results[r.JobID], sr)
+		sr := protocol.ScanResult{IP: ip, Port: port, Open: open != 0}
+		if errMsg.Valid {
+			sr.Err = errMsg.String
+		}
+		s.results[jobID] = append(s.results[jobID], sr)
+	}
+	if err := resultRows.Err(); err != nil {
+		return false, fmt.Errorf("iterate results rows: %w", err)
 	}
 
-	type agentRow struct {
-		AgentID             string  `json:"agent_id"`
-		LastSeen            string  `json:"last_seen"`
-		CurrentJobID        *string `json:"current_job_id"`
-		AllowRestrictedNets int     `json:"allow_restricted_nets"`
-		CompletedJobs       int     `json:"completed_jobs"`
-		FailedJobs          int     `json:"failed_jobs"`
-	}
-	agentRows, err := queryRows[agentRow](s, "SELECT agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs FROM agents;")
+	agentRows, err := s.db.Query("SELECT agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs FROM agents;")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("query agents: %w", err)
 	}
-	for _, r := range agentRows {
-		ls, err := parseTime(r.LastSeen)
+	defer agentRows.Close()
+	for agentRows.Next() {
+		var agentID string
+		var lastSeenRaw string
+		var currentJobID sql.NullString
+		var allowRestrictedNets int
+		var completedJobs int
+		var failedJobs int
+		if err := agentRows.Scan(&agentID, &lastSeenRaw, &currentJobID, &allowRestrictedNets, &completedJobs, &failedJobs); err != nil {
+			return false, fmt.Errorf("scan agents row: %w", err)
+		}
+		ls, err := parseTime(lastSeenRaw)
 		if err != nil {
 			return false, err
 		}
 		ag := agentRecord{
 			LastSeen:            ls,
-			AllowRestrictedNets: r.AllowRestrictedNets != 0,
-			CompletedJobs:       r.CompletedJobs,
-			FailedJobs:          r.FailedJobs,
+			AllowRestrictedNets: allowRestrictedNets != 0,
+			CompletedJobs:       completedJobs,
+			FailedJobs:          failedJobs,
 		}
-		if r.CurrentJobID != nil {
-			ag.CurrentJobID = *r.CurrentJobID
+		if currentJobID.Valid {
+			ag.CurrentJobID = currentJobID.String
 		}
-		s.agents[r.AgentID] = ag
+		s.agents[agentID] = ag
+	}
+	if err := agentRows.Err(); err != nil {
+		return false, fmt.Errorf("iterate agents rows: %w", err)
 	}
 
-	type metaRow struct {
-		Value string `json:"value"`
+	var nextIDRaw sql.NullString
+	if err := s.db.QueryRow("SELECT value FROM meta WHERE key='next_id';").Scan(&nextIDRaw); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("query next_id meta: %w", err)
 	}
-	metaRows, err := queryRows[metaRow](s, "SELECT value FROM meta WHERE key='next_id';")
-	if err != nil {
-		return false, err
-	}
-	if len(metaRows) > 0 {
-		if n, err := strconv.Atoi(metaRows[0].Value); err == nil && n > 0 {
+	if nextIDRaw.Valid {
+		if n, err := strconv.Atoi(nextIDRaw.String); err == nil && n > 0 {
 			s.nextID = n
 		}
 	}
@@ -681,18 +715,18 @@ func (s *Store) migrateFromBlobTableLocked() (bool, error) {
 	if !exists {
 		return false, nil
 	}
-	type blobRow struct {
-		StateJSON string `json:"state_json"`
+	var stateJSON sql.NullString
+	if err := s.db.QueryRow("SELECT state_json FROM multiscan_state WHERE id=1;").Scan(&stateJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query multiscan_state: %w", err)
 	}
-	rows, err := queryRows[blobRow](s, "SELECT state_json FROM multiscan_state WHERE id=1;")
-	if err != nil {
-		return false, err
-	}
-	if len(rows) == 0 || strings.TrimSpace(rows[0].StateJSON) == "" {
+	if !stateJSON.Valid || strings.TrimSpace(stateJSON.String) == "" {
 		return false, nil
 	}
 	var ps persistedState
-	if err := json.Unmarshal([]byte(rows[0].StateJSON), &ps); err != nil {
+	if err := json.Unmarshal([]byte(stateJSON.String), &ps); err != nil {
 		return false, err
 	}
 	s.applyPersistedState(ps)
@@ -703,103 +737,138 @@ func (s *Store) migrateFromBlobTableLocked() (bool, error) {
 }
 
 func (s *Store) saveLocked() error {
-	var b strings.Builder
-	b.WriteString("BEGIN IMMEDIATE;\n")
-	b.WriteString("DELETE FROM job_order;\n")
-	b.WriteString("DELETE FROM jobs;\n")
-	b.WriteString("DELETE FROM results;\n")
-	b.WriteString("DELETE FROM agents;\n")
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite tx: %w", err)
+	}
+	defer tx.Rollback()
 
+	for _, stmt := range []string{
+		"DELETE FROM job_order;",
+		"DELETE FROM jobs;",
+		"DELETE FROM results;",
+		"DELETE FROM agents;",
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("reset tables: %w", err)
+		}
+	}
+
+	insertOrder, err := tx.Prepare("INSERT INTO job_order(position,job_id) VALUES(?,?);")
+	if err != nil {
+		return fmt.Errorf("prepare job_order insert: %w", err)
+	}
+	defer insertOrder.Close()
 	for i, id := range s.order {
-		b.WriteString("INSERT INTO job_order(position,job_id) VALUES(")
-		b.WriteString(strconv.Itoa(i + 1))
-		b.WriteString(",'" + escapeSQLString(id) + "');\n")
+		if _, err := insertOrder.Exec(i+1, id); err != nil {
+			return fmt.Errorf("insert job_order row: %w", err)
+		}
 	}
 
+	insertJob, err := tx.Prepare(`INSERT INTO jobs(
+id,parent_job_id,start_ip,end_ip,start_port,end_port,ports_json,port_count,status,assigned_to,attempts,max_attempts,lease_expires_at,last_error,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);`)
+	if err != nil {
+		return fmt.Errorf("prepare jobs insert: %w", err)
+	}
+	defer insertJob.Close()
 	for _, job := range s.jobs {
-		b.WriteString("INSERT INTO jobs(id,parent_job_id,start_ip,end_ip,start_port,end_port,ports_json,port_count,status,assigned_to,attempts,max_attempts,lease_expires_at,last_error,created_at,updated_at) VALUES(")
-		b.WriteString("'" + escapeSQLString(job.ID) + "',")
+		var parentID any
 		if job.ParentJobID != "" {
-			b.WriteString("'" + escapeSQLString(job.ParentJobID) + "',")
-		} else {
-			b.WriteString("NULL,")
+			parentID = job.ParentJobID
 		}
-		b.WriteString("'" + escapeSQLString(job.StartIP) + "',")
-		b.WriteString("'" + escapeSQLString(job.EndIP) + "',")
-		b.WriteString(strconv.Itoa(job.StartPort) + ",")
-		b.WriteString(strconv.Itoa(job.EndPort) + ",")
+		var portsJSON any
 		if len(job.Ports) > 0 {
-			portsJSON, _ := json.Marshal(job.Ports)
-			b.WriteString("'" + escapeSQLString(string(portsJSON)) + "',")
-		} else {
-			b.WriteString("NULL,")
+			encoded, _ := json.Marshal(job.Ports)
+			portsJSON = string(encoded)
 		}
-		b.WriteString(strconv.Itoa(job.PortCount) + ",")
-		b.WriteString("'" + escapeSQLString(string(job.Status)) + "',")
+		var assignedTo any
 		if job.AssignedTo != "" {
-			b.WriteString("'" + escapeSQLString(job.AssignedTo) + "',")
-		} else {
-			b.WriteString("NULL,")
+			assignedTo = job.AssignedTo
 		}
-		b.WriteString(strconv.Itoa(job.Attempts) + ",")
-		b.WriteString(strconv.Itoa(job.MaxAttempts) + ",")
+		var leaseExpiresAt any
 		if job.LeaseExpiresAt != nil {
-			b.WriteString("'" + escapeSQLString(job.LeaseExpiresAt.UTC().Format(time.RFC3339Nano)) + "',")
-		} else {
-			b.WriteString("NULL,")
+			leaseExpiresAt = job.LeaseExpiresAt.UTC().Format(time.RFC3339Nano)
 		}
+		var lastError any
 		if job.LastError != "" {
-			b.WriteString("'" + escapeSQLString(job.LastError) + "',")
-		} else {
-			b.WriteString("NULL,")
+			lastError = job.LastError
 		}
-		b.WriteString("'" + job.CreatedAt.UTC().Format(time.RFC3339Nano) + "',")
-		b.WriteString("'" + job.UpdatedAt.UTC().Format(time.RFC3339Nano) + "');\n")
+		if _, err := insertJob.Exec(
+			job.ID,
+			parentID,
+			job.StartIP,
+			job.EndIP,
+			job.StartPort,
+			job.EndPort,
+			portsJSON,
+			job.PortCount,
+			string(job.Status),
+			assignedTo,
+			job.Attempts,
+			job.MaxAttempts,
+			leaseExpiresAt,
+			lastError,
+			job.CreatedAt.UTC().Format(time.RFC3339Nano),
+			job.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return fmt.Errorf("insert jobs row: %w", err)
+		}
 	}
 
+	insertResult, err := tx.Prepare("INSERT INTO results(job_id,ip,port,open,err) VALUES(?,?,?,?,?);")
+	if err != nil {
+		return fmt.Errorf("prepare results insert: %w", err)
+	}
+	defer insertResult.Close()
 	for jobID, list := range s.results {
 		for _, r := range list {
-			b.WriteString("INSERT INTO results(job_id,ip,port,open,err) VALUES(")
-			b.WriteString("'" + escapeSQLString(jobID) + "',")
-			b.WriteString("'" + escapeSQLString(r.IP) + "',")
-			b.WriteString(strconv.Itoa(r.Port) + ",")
+			openVal := 0
 			if r.Open {
-				b.WriteString("1,")
-			} else {
-				b.WriteString("0,")
+				openVal = 1
 			}
+			var errMsg any
 			if r.Err != "" {
-				b.WriteString("'" + escapeSQLString(r.Err) + "');\n")
-			} else {
-				b.WriteString("NULL);\n")
+				errMsg = r.Err
+			}
+			if _, err := insertResult.Exec(jobID, r.IP, r.Port, openVal, errMsg); err != nil {
+				return fmt.Errorf("insert results row: %w", err)
 			}
 		}
 	}
 
+	insertAgent, err := tx.Prepare("INSERT INTO agents(agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs) VALUES(?,?,?,?,?,?);")
+	if err != nil {
+		return fmt.Errorf("prepare agents insert: %w", err)
+	}
+	defer insertAgent.Close()
 	for id, a := range s.agents {
-		b.WriteString("INSERT INTO agents(agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs) VALUES(")
-		b.WriteString("'" + escapeSQLString(id) + "',")
-		b.WriteString("'" + a.LastSeen.UTC().Format(time.RFC3339Nano) + "',")
-		if a.CurrentJobID != "" {
-			b.WriteString("'" + escapeSQLString(a.CurrentJobID) + "',")
-		} else {
-			b.WriteString("NULL,")
-		}
+		allowRestricted := 0
 		if a.AllowRestrictedNets {
-			b.WriteString("1,")
-		} else {
-			b.WriteString("0,")
+			allowRestricted = 1
 		}
-		b.WriteString(strconv.Itoa(a.CompletedJobs) + ",")
-		b.WriteString(strconv.Itoa(a.FailedJobs) + ");\n")
+		var currentJobID any
+		if a.CurrentJobID != "" {
+			currentJobID = a.CurrentJobID
+		}
+		if _, err := insertAgent.Exec(
+			id,
+			a.LastSeen.UTC().Format(time.RFC3339Nano),
+			currentJobID,
+			allowRestricted,
+			a.CompletedJobs,
+			a.FailedJobs,
+		); err != nil {
+			return fmt.Errorf("insert agents row: %w", err)
+		}
 	}
 
-	b.WriteString("INSERT INTO meta(key,value) VALUES('next_id','" + strconv.Itoa(s.nextID) + "') ON CONFLICT(key) DO UPDATE SET value=excluded.value;\n")
-	b.WriteString("COMMIT;\n")
+	if _, err := tx.Exec("INSERT INTO meta(key,value) VALUES('next_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;", strconv.Itoa(s.nextID)); err != nil {
+		return fmt.Errorf("upsert meta next_id: %w", err)
+	}
 
-	if err := s.execSQLite(b.String()); err != nil {
-		_ = s.execSQLite("ROLLBACK;")
-		return err
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite tx: %w", err)
 	}
 	return nil
 }
@@ -877,77 +946,21 @@ CREATE INDEX IF NOT EXISTS idx_jobs_parent ON jobs(parent_job_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
 `
-	if err := s.execSQLite(schema); err != nil {
+	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	_ = s.execSQLite("ALTER TABLE jobs ADD COLUMN ports_json TEXT;")
-	_ = s.execSQLite("ALTER TABLE jobs ADD COLUMN port_count INTEGER NOT NULL DEFAULT 0;")
-	_ = s.execSQLite("ALTER TABLE agents ADD COLUMN allow_restricted_nets INTEGER NOT NULL DEFAULT 0;")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN ports_json TEXT;")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN port_count INTEGER NOT NULL DEFAULT 0;")
+	_, _ = s.db.Exec("ALTER TABLE agents ADD COLUMN allow_restricted_nets INTEGER NOT NULL DEFAULT 0;")
 	return nil
-}
-
-func (s *Store) execSQLite(sql string) error {
-	cmd := exec.Command("sqlite3", s.dbPath, sql)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return fmt.Errorf("sqlite3 exec failed: %s", msg)
-	}
-	return nil
-}
-
-func (s *Store) querySQLiteJSON(sql string) ([]json.RawMessage, error) {
-	cmd := exec.Command("sqlite3", "-json", s.dbPath, sql)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("sqlite3 query failed: %s", msg)
-	}
-	out := bytes.TrimSpace(stdout.Bytes())
-	if len(out) == 0 {
-		return nil, nil
-	}
-	var rows []json.RawMessage
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("decode sqlite JSON output: %w", err)
-	}
-	return rows, nil
 }
 
 func (s *Store) tableExists(name string) (bool, error) {
-	type row struct {
-		N int `json:"n"`
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?;", name).Scan(&n); err != nil {
+		return false, fmt.Errorf("check table %q exists: %w", name, err)
 	}
-	rows, err := queryRows[row](s, "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='"+escapeSQLString(name)+"';")
-	if err != nil {
-		return false, err
-	}
-	return len(rows) > 0 && rows[0].N > 0, nil
-}
-
-func queryRows[T any](s *Store, sql string) ([]T, error) {
-	raw, err := s.querySQLiteJSON(sql)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]T, 0, len(raw))
-	for _, r := range raw {
-		var row T
-		if err := json.Unmarshal(r, &row); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, nil
+	return n > 0, nil
 }
 
 func parseTime(v string) (time.Time, error) {
@@ -1295,8 +1308,4 @@ func prefixRangeUint32(p netip.Prefix) (uint32, uint32) {
 	}
 	mask := ^uint32(0) >> bits
 	return base, base + mask
-}
-
-func escapeSQLString(v string) string {
-	return strings.ReplaceAll(v, "'", "''")
 }

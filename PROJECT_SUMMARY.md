@@ -18,7 +18,7 @@ Distributed TCP scanner with:
 - `internal/protocol`: shared request/response structs
 
 ### Persistence
-- SQLite-backed via local `sqlite3` CLI binary (no Go SQL driver dependency).
+- SQLite-backed via embedded Go driver (`modernc.org/sqlite`) through `database/sql` (no external `sqlite3` binary required).
 - Main DB path: `DB_PATH` (default `/data/state.db` in container, `./data/state.db` local).
 - Normalized tables:
   - `jobs`
@@ -161,18 +161,17 @@ Top ports source order:
 - `RETRY_DELAY`
 
 ## Known Constraints / Technical Debt
-- SQLite is accessed via shelling out to `sqlite3` CLI (not `database/sql` driver).
-  - Pros: no network/download dependency for driver.
-  - Tradeoff: less efficient than direct DB driver usage.
+- SQLite dependency tree is larger due embedded driver transitive modules.
+- `Store` holds a process-lifetime DB handle and does not expose an explicit close method yet.
 - No auth roles/scopes yet; shared client key is global.
 - No unit tests yet (project compiles and packages pass `go test ./...` with no test files).
 
 ## Suggested Next Steps
-1. Replace `sqlite3` CLI persistence path with native Go SQLite driver when dependency install is available.
-2. Add role-based auth model (separate agent keys, UI users).
-3. Add tests for:
+1. Add role-based auth model (separate agent keys, UI users).
+2. Add tests for:
    - assignment filtering by restricted CIDR flag
    - parent/sub-job aggregation
    - top-N fallback ordering
    - reconnect and heartbeat semantics
-4. Add pagination for large result sets in UI/API.
+3. Add pagination for large result sets in UI/API.
+4. Add integration tests for DB restart/migration paths (relational, blob table, legacy JSON).

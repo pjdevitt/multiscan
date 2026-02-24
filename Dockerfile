@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/multiscan-server ./cmd/server
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates sqlite
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /out/multiscan-server /usr/local/bin/multiscan-server

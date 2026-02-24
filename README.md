@@ -217,7 +217,7 @@ Notes:
 
 - `DB_PATH` should point inside the mounted `/data` path, otherwise DB state is ephemeral.
 - First startup can import a legacy JSON state file from `LEGACY_STATE_FILE` if present.
-- Container includes the `sqlite3` CLI required by the server storage backend.
+- Container embeds SQLite via a compiled Go dependency; no `sqlite3` binary is required at runtime.
 - If `REQUIRED_CLIENT_KEY` is set, agents must provide matching `CLIENT_KEY`.
 - If `UI_BASIC_AUTH_USER` and `UI_BASIC_AUTH_PASS` are set, browser UI access requires basic auth credentials.
 
@@ -238,4 +238,4 @@ Notes:
 
 - Scanner performs TCP connect scans only.
 - IPv4 ranges are supported.
-- Server storage uses local `sqlite3` command-line binary, which must be available on the host.
+- Server storage uses an embedded SQLite driver compiled into the binary.
