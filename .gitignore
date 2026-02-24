@@ -1,1 +1,3 @@
 data/*
+data/state.db-shm
+data/state.db-wal
