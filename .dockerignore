@@ -5,3 +5,6 @@ data
 *.sqlite
 *.sqlite3
 *.log
+*.db-shm
+*.db-wal
+
