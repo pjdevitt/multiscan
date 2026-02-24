@@ -22,6 +22,7 @@ func main() {
 	agentID := envOrDefault("AGENT_ID", "agent-1")
 	serverURL := envOrDefault("SERVER_URL", "http://localhost:8080")
 	clientKey := envOrDefault("CLIENT_KEY", "")
+	allowRestrictedNets := envBoolOrDefault("ALLOW_RESTRICTED_NET_SCANS", false)
 	wsURL := envOrDefault("WS_URL", serverToWSURL(serverURL))
 	wsURL = appendClientKeyToURL(wsURL, clientKey)
 	heartbeatURL := envOrDefault("HEARTBEAT_URL", serverToHeartbeatURL(serverURL))
@@ -35,14 +36,14 @@ func main() {
 	log.Printf("agent %s connecting websocket %s", agentID, wsURL)
 
 	for {
-		if err := runSession(agentID, wsURL, heartbeatURL, clientKey, heartbeatInterval, wsReadTimeout, wsWriteTimeout, heartbeatClient, &completion); err != nil {
+		if err := runSession(agentID, wsURL, heartbeatURL, clientKey, allowRestrictedNets, heartbeatInterval, wsReadTimeout, wsWriteTimeout, heartbeatClient, &completion); err != nil {
 			log.Printf("websocket session error: %v", err)
 			time.Sleep(retryDelay)
 		}
 	}
 }
 
-func runSession(agentID, wsURL, heartbeatURL, clientKey string, heartbeatInterval, wsReadTimeout, wsWriteTimeout time.Duration, heartbeatClient *http.Client, completion **protocol.JobCompletion) error {
+func runSession(agentID, wsURL, heartbeatURL, clientKey string, allowRestrictedNets bool, heartbeatInterval, wsReadTimeout, wsWriteTimeout time.Duration, heartbeatClient *http.Client, completion **protocol.JobCompletion) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -53,7 +54,11 @@ func runSession(agentID, wsURL, heartbeatURL, clientKey string, heartbeatInterva
 	defer conn.Close()
 
 	for {
-		req := protocol.SyncRequest{AgentID: agentID, Completion: *completion}
+		req := protocol.SyncRequest{
+			AgentID:             agentID,
+			AllowRestrictedNets: allowRestrictedNets,
+			Completion:          *completion,
+		}
 		if wsWriteTimeout > 0 {
 			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 		}
@@ -100,7 +105,7 @@ func runSession(agentID, wsURL, heartbeatURL, clientKey string, heartbeatInterva
 		} else {
 			log.Printf("received %s attempt %d/%d: %s-%s ports %d-%d", job.ID, job.Attempts, job.MaxAttempts, job.StartIP, job.EndIP, job.StartPort, job.EndPort)
 		}
-		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, clientKey, agentID, job.ID, heartbeatInterval)
+		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, clientKey, agentID, job.ID, allowRestrictedNets, heartbeatInterval)
 		scanCfg := scanner.Config{Timeout: 600 * time.Millisecond, Concurrency: 256}
 		var (
 			results []protocol.ScanResult
@@ -124,7 +129,7 @@ func runSession(agentID, wsURL, heartbeatURL, clientKey string, heartbeatInterva
 	}
 }
 
-func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, interval time.Duration) func() {
+func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool, interval time.Duration) func() {
 	if interval <= 0 || heartbeatURL == "" {
 		return func() {}
 	}
@@ -135,14 +140,14 @@ func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID
 		once.Do(func() { close(stopCh) })
 	}
 
-	sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID)
+	sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets)
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID)
+				sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets)
 			case <-stopCh:
 				return
 			}
@@ -151,10 +156,11 @@ func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID
 	return stop
 }
 
-func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string) {
+func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool) {
 	reqBody, err := json.Marshal(protocol.HeartbeatRequest{
-		AgentID:      agentID,
-		CurrentJobID: jobID,
+		AgentID:             agentID,
+		CurrentJobID:        jobID,
+		AllowRestrictedNets: allowRestrictedNets,
 	})
 	if err != nil {
 		log.Printf("heartbeat marshal error: %v", err)
@@ -260,4 +266,20 @@ func envDurationOrDefault(name string, fallback time.Duration) time.Duration {
 		log.Printf("invalid duration for %s=%q, using %s", name, v, fallback)
 	}
 	return fallback
+}
+
+func envBoolOrDefault(name string, fallback bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		log.Printf("invalid boolean for %s=%q, using %t", name, v, fallback)
+		return fallback
+	}
 }

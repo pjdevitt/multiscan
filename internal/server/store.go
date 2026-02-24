@@ -30,10 +30,11 @@ type Config struct {
 }
 
 type agentRecord struct {
-	LastSeen      time.Time `json:"last_seen"`
-	CurrentJobID  string    `json:"current_job_id,omitempty"`
-	CompletedJobs int       `json:"completed_jobs"`
-	FailedJobs    int       `json:"failed_jobs"`
+	LastSeen            time.Time `json:"last_seen"`
+	CurrentJobID        string    `json:"current_job_id,omitempty"`
+	AllowRestrictedNets bool      `json:"allow_restricted_nets"`
+	CompletedJobs       int       `json:"completed_jobs"`
+	FailedJobs          int       `json:"failed_jobs"`
 }
 
 type persistedState struct {
@@ -58,6 +59,12 @@ type Store struct {
 }
 
 const portBatchSize = 1024
+
+var restrictedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+}
 
 func NewStore(cfg Config) (*Store, error) {
 	if cfg.DBPath == "" {
@@ -180,16 +187,16 @@ func (s *Store) FailJobAttempt(jobID, agentID, agentErr string) error {
 	return s.failJobAttemptLocked(jobID, agentID, agentErr)
 }
 
-func (s *Store) TouchAgent(agentID string) {
+func (s *Store) TouchAgent(agentID string, allowRestrictedNets bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.touchAgentLocked(agentID, "")
+	s.touchAgentLocked(agentID, "", allowRestrictedNets)
 }
 
-func (s *Store) Heartbeat(agentID, currentJobID string) {
+func (s *Store) Heartbeat(agentID, currentJobID string, allowRestrictedNets bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.touchAgentLocked(agentID, currentJobID)
+	s.touchAgentLocked(agentID, currentJobID, allowRestrictedNets)
 }
 
 func (s *Store) WaitAndAssign(agentID string, maxWait time.Duration) (protocol.Job, error) {
@@ -199,7 +206,8 @@ func (s *Store) WaitAndAssign(agentID string, maxWait time.Duration) (protocol.J
 	deadline := time.Now().Add(maxWait)
 	for {
 		s.mu.Lock()
-		s.touchAgentLocked(agentID, "")
+		allowRestricted := s.agents[agentID].AllowRestrictedNets
+		s.touchAgentLocked(agentID, "", allowRestricted)
 		s.requeueExpiredLocked(time.Now().UTC())
 		job, err := s.assignNextLocked(agentID)
 		s.mu.Unlock()
@@ -277,18 +285,20 @@ func (s *Store) ListAgents(offlineAfter time.Duration) []protocol.AgentStatus {
 			state = "offline"
 		}
 		out = append(out, protocol.AgentStatus{
-			AgentID:       id,
-			State:         state,
-			LastSeen:      rec.LastSeen,
-			CurrentJobID:  rec.CurrentJobID,
-			CompletedJobs: rec.CompletedJobs,
-			FailedJobs:    rec.FailedJobs,
+			AgentID:             id,
+			State:               state,
+			LastSeen:            rec.LastSeen,
+			CurrentJobID:        rec.CurrentJobID,
+			AllowRestrictedNets: rec.AllowRestrictedNets,
+			CompletedJobs:       rec.CompletedJobs,
+			FailedJobs:          rec.FailedJobs,
 		})
 	}
 	return out
 }
 
 func (s *Store) assignNextLocked(agentID string) (protocol.Job, error) {
+	allowRestricted := s.agents[agentID].AllowRestrictedNets
 	childIdx := s.childIndexLocked()
 	for _, id := range s.order {
 		job, ok := s.jobs[id]
@@ -299,6 +309,9 @@ func (s *Store) assignNextLocked(agentID string) (protocol.Job, error) {
 			continue
 		}
 		if job.ParentJobID == "" && len(childIdx[id]) > 0 {
+			continue
+		}
+		if !allowRestricted && jobTargetsRestrictedNets(job) {
 			continue
 		}
 
@@ -439,9 +452,10 @@ func (s *Store) requeueExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *Store) touchAgentLocked(agentID, currentJobID string) {
+func (s *Store) touchAgentLocked(agentID, currentJobID string, allowRestrictedNets bool) {
 	rec := s.agents[agentID]
 	rec.LastSeen = time.Now().UTC()
+	rec.AllowRestrictedNets = allowRestrictedNets
 	if currentJobID != "" {
 		rec.CurrentJobID = currentJobID
 	}
@@ -612,13 +626,14 @@ func (s *Store) loadFromRelationalLocked() (bool, error) {
 	}
 
 	type agentRow struct {
-		AgentID       string  `json:"agent_id"`
-		LastSeen      string  `json:"last_seen"`
-		CurrentJobID  *string `json:"current_job_id"`
-		CompletedJobs int     `json:"completed_jobs"`
-		FailedJobs    int     `json:"failed_jobs"`
+		AgentID             string  `json:"agent_id"`
+		LastSeen            string  `json:"last_seen"`
+		CurrentJobID        *string `json:"current_job_id"`
+		AllowRestrictedNets int     `json:"allow_restricted_nets"`
+		CompletedJobs       int     `json:"completed_jobs"`
+		FailedJobs          int     `json:"failed_jobs"`
 	}
-	agentRows, err := queryRows[agentRow](s, "SELECT agent_id,last_seen,current_job_id,completed_jobs,failed_jobs FROM agents;")
+	agentRows, err := queryRows[agentRow](s, "SELECT agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs FROM agents;")
 	if err != nil {
 		return false, err
 	}
@@ -627,7 +642,12 @@ func (s *Store) loadFromRelationalLocked() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		ag := agentRecord{LastSeen: ls, CompletedJobs: r.CompletedJobs, FailedJobs: r.FailedJobs}
+		ag := agentRecord{
+			LastSeen:            ls,
+			AllowRestrictedNets: r.AllowRestrictedNets != 0,
+			CompletedJobs:       r.CompletedJobs,
+			FailedJobs:          r.FailedJobs,
+		}
 		if r.CurrentJobID != nil {
 			ag.CurrentJobID = *r.CurrentJobID
 		}
@@ -757,13 +777,18 @@ func (s *Store) saveLocked() error {
 	}
 
 	for id, a := range s.agents {
-		b.WriteString("INSERT INTO agents(agent_id,last_seen,current_job_id,completed_jobs,failed_jobs) VALUES(")
+		b.WriteString("INSERT INTO agents(agent_id,last_seen,current_job_id,allow_restricted_nets,completed_jobs,failed_jobs) VALUES(")
 		b.WriteString("'" + escapeSQLString(id) + "',")
 		b.WriteString("'" + a.LastSeen.UTC().Format(time.RFC3339Nano) + "',")
 		if a.CurrentJobID != "" {
 			b.WriteString("'" + escapeSQLString(a.CurrentJobID) + "',")
 		} else {
 			b.WriteString("NULL,")
+		}
+		if a.AllowRestrictedNets {
+			b.WriteString("1,")
+		} else {
+			b.WriteString("0,")
 		}
 		b.WriteString(strconv.Itoa(a.CompletedJobs) + ",")
 		b.WriteString(strconv.Itoa(a.FailedJobs) + ");\n")
@@ -840,6 +865,7 @@ CREATE TABLE IF NOT EXISTS agents (
   agent_id TEXT PRIMARY KEY,
   last_seen TEXT NOT NULL,
   current_job_id TEXT,
+  allow_restricted_nets INTEGER NOT NULL DEFAULT 0,
   completed_jobs INTEGER NOT NULL,
   failed_jobs INTEGER NOT NULL
 );
@@ -856,6 +882,7 @@ CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
 	}
 	_ = s.execSQLite("ALTER TABLE jobs ADD COLUMN ports_json TEXT;")
 	_ = s.execSQLite("ALTER TABLE jobs ADD COLUMN port_count INTEGER NOT NULL DEFAULT 0;")
+	_ = s.execSQLite("ALTER TABLE agents ADD COLUMN allow_restricted_nets INTEGER NOT NULL DEFAULT 0;")
 	return nil
 }
 
@@ -1228,6 +1255,46 @@ func portCountForJob(start, end int, ports []int) int {
 		return end - start + 1
 	}
 	return 0
+}
+
+func jobTargetsRestrictedNets(job protocol.Job) bool {
+	startAddr, err := netip.ParseAddr(job.StartIP)
+	if err != nil || !startAddr.Is4() {
+		return false
+	}
+	endAddr, err := netip.ParseAddr(job.EndIP)
+	if err != nil || !endAddr.Is4() {
+		return false
+	}
+	startNum := ipv4ToUint32(startAddr)
+	endNum := ipv4ToUint32(endAddr)
+	if startNum > endNum {
+		startNum, endNum = endNum, startNum
+	}
+	for _, p := range restrictedPrefixes {
+		if !p.Addr().Is4() {
+			continue
+		}
+		pStart, pEnd := prefixRangeUint32(p)
+		if startNum <= pEnd && endNum >= pStart {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixRangeUint32(p netip.Prefix) (uint32, uint32) {
+	base := ipv4ToUint32(p.Masked().Addr())
+	bits := p.Bits()
+	if bits <= 0 {
+		return 0, ^uint32(0)
+	}
+	hostBits := 32 - bits
+	if hostBits <= 0 {
+		return base, base
+	}
+	mask := ^uint32(0) >> bits
+	return base, base + mask
 }
 
 func escapeSQLString(v string) string {

@@ -32,6 +32,12 @@ MultiScan is a distributed TCP scanner with two components:
 - In-task heartbeat:
   - While scanning, agents post periodic heartbeats to `/heartbeat`.
   - Dashboard `last_seen` updates during long-running scans.
+- Restricted-network guardrail:
+  - Agent policy flag `ALLOW_RESTRICTED_NET_SCANS` controls whether it can receive jobs targeting:
+    - `192.168.0.0/16`
+    - `10.0.0.0/8`
+    - `172.16.0.0/12`
+  - Server will not assign such jobs to agents where the flag is false.
 - Efficient result retention:
   - Only open/connectable endpoints are retained in job results.
   - Closed/timeout endpoints are not persisted in coordinator state.
@@ -80,6 +86,18 @@ go run ./cmd/server
 
 ```bash
 AGENT_ID=agent-a SERVER_URL=http://localhost:8080 go run ./cmd/agent
+```
+
+Disallow restricted-network scans (default):
+
+```bash
+AGENT_ID=agent-a SERVER_URL=http://localhost:8080 ALLOW_RESTRICTED_NET_SCANS=false go run ./cmd/agent
+```
+
+Allow restricted-network scans on trusted agents:
+
+```bash
+AGENT_ID=agent-trusted SERVER_URL=http://localhost:8080 ALLOW_RESTRICTED_NET_SCANS=true go run ./cmd/agent
 ```
 
 With client-key auth enabled on server:

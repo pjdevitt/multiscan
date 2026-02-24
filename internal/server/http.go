@@ -164,7 +164,7 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent_id is required"})
 		return
 	}
-	a.store.Heartbeat(req.AgentID, strings.TrimSpace(req.CurrentJobID))
+	a.store.Heartbeat(req.AgentID, strings.TrimSpace(req.CurrentJobID), req.AllowRestrictedNets)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -214,7 +214,7 @@ func (a *API) processSync(req protocol.SyncRequest) (protocol.SyncResponse, int,
 	if req.AgentID == "" {
 		return protocol.SyncResponse{}, http.StatusBadRequest, errors.New("agent_id is required")
 	}
-	a.store.TouchAgent(req.AgentID)
+	a.store.TouchAgent(req.AgentID, req.AllowRestrictedNets)
 
 	if req.Completion != nil {
 		if strings.TrimSpace(req.Completion.JobID) == "" {

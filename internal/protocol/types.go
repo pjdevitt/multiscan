@@ -69,8 +69,9 @@ type JobCompletion struct {
 // SyncRequest is a synchronous bidirectional work exchange payload.
 // Agent may include Completion for the previous job and request next work.
 type SyncRequest struct {
-	AgentID    string         `json:"agent_id"`
-	Completion *JobCompletion `json:"completion,omitempty"`
+	AgentID             string         `json:"agent_id"`
+	AllowRestrictedNets bool           `json:"allow_restricted_nets,omitempty"`
+	Completion          *JobCompletion `json:"completion,omitempty"`
 }
 
 // SyncAction describes server instruction after processing sync.
@@ -118,16 +119,18 @@ type JobListItem struct {
 
 // AgentStatus describes coordinator view of an agent heartbeat and workload.
 type AgentStatus struct {
-	AgentID       string    `json:"agent_id"`
-	State         string    `json:"state"`
-	LastSeen      time.Time `json:"last_seen"`
-	CurrentJobID  string    `json:"current_job_id,omitempty"`
-	CompletedJobs int       `json:"completed_jobs"`
-	FailedJobs    int       `json:"failed_jobs"`
+	AgentID             string    `json:"agent_id"`
+	State               string    `json:"state"`
+	LastSeen            time.Time `json:"last_seen"`
+	CurrentJobID        string    `json:"current_job_id,omitempty"`
+	AllowRestrictedNets bool      `json:"allow_restricted_nets"`
+	CompletedJobs       int       `json:"completed_jobs"`
+	FailedJobs          int       `json:"failed_jobs"`
 }
 
 // HeartbeatRequest updates coordinator liveness for an agent.
 type HeartbeatRequest struct {
-	AgentID      string `json:"agent_id"`
-	CurrentJobID string `json:"current_job_id,omitempty"`
+	AgentID             string `json:"agent_id"`
+	CurrentJobID        string `json:"current_job_id,omitempty"`
+	AllowRestrictedNets bool   `json:"allow_restricted_nets,omitempty"`
 }
