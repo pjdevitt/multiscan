@@ -10,6 +10,52 @@ Use this file as a rolling, append-only handoff log for future Codex sessions.
 
 ---
 
+## Session: 2026-02-25 21:07 (UTC)
+
+### Objective
+- Replace UI target fields with one textbox that accepts multiple hostnames, IPv4 addresses, and CIDR ranges.
+
+### Changes Implemented
+- Replaced `hostname` / `start_ip` / `end_ip` inputs in the dashboard with a single `targets` textarea.
+- Added client-side target parsing for comma/space/newline-separated entries.
+- Added client-side IPv4 and CIDR parsing helpers:
+  - IPv4 entries map to single-IP job payloads (`start_ip=end_ip`).
+  - CIDR entries map to equivalent start/end IPv4 range payloads.
+  - Non-IP/non-CIDR entries are sent as `hostname`.
+- Updated submit flow to create one API job request per parsed target and report partial failures in UI notice text.
+
+### Files Touched
+- `/Users/pjdevitt/Development/MultiScan/internal/server/ui.go`
+
+### Config / Env Changes
+- New env vars:
+  - none
+- Changed defaults:
+  - none
+
+### Validation
+- Commands run:
+  - `gofmt -w internal/server/ui.go`
+  - `go test ./...`
+- Result:
+  - pass (all packages compile; no test files present).
+
+### Migrations / Data Notes
+- No DB/API schema changes in this step.
+
+### Risks / Caveats
+- UI now submits one API request per target, so mixed target lists create multiple parent jobs.
+- CIDR conversion is IPv4-only in the current client logic.
+
+### Next Suggested Steps
+1. Add backend-native multi-target request support if one logical parent job is preferred across all targets.
+2. Add UI hints/preview for expanded CIDR ranges before submission.
+
+### Open Questions
+- Whether multi-target submissions should remain multiple parent jobs or be grouped under one parent job.
+
+---
+
 ## Session: 2026-02-25 20:29 (UTC)
 
 ### Objective

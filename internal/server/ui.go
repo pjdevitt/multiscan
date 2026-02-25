@@ -149,14 +149,8 @@ const dashboardHTML = `<!doctype html>
       <section class="panel">
         <h2>Create Job</h2>
         <form id="job-form">
-          <label>Hostname (single target, optional)
-            <input name="hostname" placeholder="scanme.nmap.org" />
-          </label>
-          <label>Start IP
-            <input name="start_ip" value="127.0.0.1" />
-          </label>
-          <label>End IP
-            <input name="end_ip" value="127.0.0.1" />
+          <label style="grid-column: 1 / -1;">Targets (hostnames, IPv4, or CIDR; separate with commas, spaces, or new lines)
+            <textarea name="targets" rows="4" required style="border:1px solid #cfd5c2;border-radius:8px;padding:10px;font-size:14px;background:#fff;resize:vertical;">127.0.0.1</textarea>
           </label>
           <label>Start Port
             <input name="start_port" type="number" value="20" min="1" max="65535" required />
@@ -268,6 +262,51 @@ const dashboardHTML = `<!doctype html>
       return esc(j.start_port) + '-' + esc(j.end_port);
     }
 
+    function isIPv4(value) {
+      const parts = value.split('.');
+      if (parts.length !== 4) return false;
+      for (const part of parts) {
+        if (!/^\d+$/.test(part)) return false;
+        const n = Number(part);
+        if (n < 0 || n > 255) return false;
+      }
+      return true;
+    }
+
+    function ipToUint32(ip) {
+      const p = ip.split('.').map(Number);
+      return (((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3]) >>> 0;
+    }
+
+    function uint32ToIP(n) {
+      return [
+        (n >>> 24) & 255,
+        (n >>> 16) & 255,
+        (n >>> 8) & 255,
+        n & 255
+      ].join('.');
+    }
+
+    function cidrToRange(cidr) {
+      const parts = cidr.split('/');
+      if (parts.length !== 2) return null;
+      const base = parts[0].trim();
+      const prefix = Number(parts[1]);
+      if (!isIPv4(base) || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+      const baseNum = ipToUint32(base);
+      const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+      const start = (baseNum & mask) >>> 0;
+      const end = (start | (~mask >>> 0)) >>> 0;
+      return { start: uint32ToIP(start), end: uint32ToIP(end) };
+    }
+
+    function parseTargets(raw) {
+      return String(raw || '')
+        .split(/[\s,;]+/)
+        .map(function(t) { return t.trim(); })
+        .filter(Boolean);
+    }
+
     async function loadJobs() {
       const res = await fetch('/api/jobs');
       const data = await res.json();
@@ -367,10 +406,14 @@ const dashboardHTML = `<!doctype html>
     document.getElementById('job-form').addEventListener('submit', async function(e) {
       e.preventDefault();
       const fd = new FormData(e.target);
-      const payload = {
-        hostname: String(fd.get('hostname') || '').trim(),
-        start_ip: String(fd.get('start_ip') || '').trim(),
-        end_ip: String(fd.get('end_ip') || '').trim(),
+      const targets = parseTargets(fd.get('targets'));
+      if (!targets.length) {
+        noticeEl.textContent = 'Provide at least one target.';
+        noticeEl.style.color = '#b42318';
+        return;
+      }
+
+      const basePayload = {
         start_port: Number(fd.get('start_port')),
         end_port: Number(fd.get('end_port')),
         top_1000: Boolean(fd.get('top_1000')),
@@ -378,28 +421,52 @@ const dashboardHTML = `<!doctype html>
         max_attempts: Number(fd.get('max_attempts'))
       };
 
-      noticeEl.textContent = 'Submitting job...';
+      noticeEl.textContent = 'Submitting job(s)...';
       noticeEl.style.color = '#5f6670';
 
-      const res = await fetch('/api/jobs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const body = await res.json();
-      if (!res.ok) {
-        noticeEl.textContent = body.error || 'Failed to submit job';
+      const created = [];
+      const failures = [];
+
+      for (const target of targets) {
+        const payload = Object.assign({}, basePayload);
+        const cidrRange = cidrToRange(target);
+        if (cidrRange) {
+          payload.start_ip = cidrRange.start;
+          payload.end_ip = cidrRange.end;
+        } else if (isIPv4(target)) {
+          payload.start_ip = target;
+          payload.end_ip = target;
+        } else {
+          payload.hostname = target;
+        }
+
+        const res = await fetch('/api/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const body = await res.json();
+        if (!res.ok) {
+          failures.push(target + ': ' + (body.error || 'request failed'));
+          continue;
+        }
+        created.push({ target: target, body: body });
+      }
+
+      if (!created.length) {
+        noticeEl.textContent = failures[0] || 'Failed to submit jobs';
         noticeEl.style.color = '#b42318';
         return;
       }
 
-      selectedJobID = body.job_id;
-      if ((body.job_count || 0) > 1) {
-        noticeEl.textContent = 'Jobs submitted: ' + body.job_count + ' batches (first ID: ' + body.job_id + ')';
+      selectedJobID = created[0].body.job_id;
+      if (failures.length) {
+        noticeEl.textContent = 'Submitted ' + created.length + ' target(s), failed ' + failures.length + ' target(s). First error: ' + failures[0];
+        noticeEl.style.color = '#b42318';
       } else {
-        noticeEl.textContent = 'Job submitted: ' + body.job_id;
+        noticeEl.textContent = 'Submitted ' + created.length + ' target(s). First job ID: ' + created[0].body.job_id;
+        noticeEl.style.color = '#067647';
       }
-      noticeEl.style.color = '#067647';
       await refresh();
     });
 
