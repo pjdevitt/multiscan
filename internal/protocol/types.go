@@ -10,6 +10,7 @@ const (
 	JobInProgress JobStatus = "in_progress"
 	JobCompleted  JobStatus = "completed"
 	JobFailed     JobStatus = "failed"
+	JobStopped    JobStatus = "stopped"
 )
 
 // SubmitJobRequest is sent to the controller to enqueue scan work.
@@ -85,10 +86,12 @@ const (
 
 // SyncResponse contains either new work or wait instruction.
 type SyncResponse struct {
-	Action      SyncAction `json:"action"`
-	Job         *Job       `json:"job,omitempty"`
-	WaitSeconds int        `json:"wait_seconds,omitempty"`
-	Message     string     `json:"message,omitempty"`
+	Action         SyncAction `json:"action"`
+	Job            *Job       `json:"job,omitempty"`
+	WaitSeconds    int        `json:"wait_seconds,omitempty"`
+	Message        string     `json:"message,omitempty"`
+	StopCurrentJob bool       `json:"stop_current_job,omitempty"`
+	StopReason     string     `json:"stop_reason,omitempty"`
 }
 
 // JobDetails returns state plus any collected results.
@@ -112,6 +115,7 @@ type JobListItem struct {
 	SubJobsActive    int       `json:"sub_jobs_active"`
 	SubJobsCompleted int       `json:"sub_jobs_completed"`
 	SubJobsFailed    int       `json:"sub_jobs_failed"`
+	SubJobsStopped   int       `json:"sub_jobs_stopped"`
 	SubJobsTotal     int       `json:"sub_jobs_total"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
@@ -134,4 +138,11 @@ type HeartbeatRequest struct {
 	AgentID             string `json:"agent_id"`
 	CurrentJobID        string `json:"current_job_id,omitempty"`
 	AllowRestrictedNets bool   `json:"allow_restricted_nets,omitempty"`
+}
+
+// HeartbeatResponse allows server-side control instructions for active agents.
+type HeartbeatResponse struct {
+	Status  string `json:"status"`
+	StopJob bool   `json:"stop_job,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }

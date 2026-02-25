@@ -242,6 +242,7 @@ Notes:
 - `POST /heartbeat`: agent heartbeat update (used during active scans)
 - `GET /api/jobs`: list all jobs
 - `POST /api/jobs`: enqueue scan job (UI uses this)
+- `POST /api/jobs/stop`: stop a parent job and its sub-jobs
 - `GET /api/agents`: list agent status/heartbeat
 - `GET /work/{jobID}`: fetch job status and results
 - `GET /healthz`: health check

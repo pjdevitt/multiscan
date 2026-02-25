@@ -204,6 +204,12 @@ func (s *Store) FailJobAttempt(jobID, agentID, agentErr string) error {
 	return s.failJobAttemptLocked(jobID, agentID, agentErr)
 }
 
+func (s *Store) StopJob(jobID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopJobLocked(jobID)
+}
+
 func (s *Store) TouchAgent(agentID string, allowRestrictedNets bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,6 +220,26 @@ func (s *Store) Heartbeat(agentID, currentJobID string, allowRestrictedNets bool
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.touchAgentLocked(agentID, currentJobID, allowRestrictedNets)
+}
+
+func (s *Store) ShouldStopJob(currentJobID string) (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if currentJobID == "" {
+		return false, ""
+	}
+	job, ok := s.jobs[currentJobID]
+	if !ok {
+		return false, ""
+	}
+	if job.Status != protocol.JobStopped {
+		return false, ""
+	}
+	reason := strings.TrimSpace(job.LastError)
+	if reason == "" {
+		reason = "stopped by user"
+	}
+	return true, reason
 }
 
 func (s *Store) WaitAndAssign(agentID string, maxWait time.Duration) (protocol.Job, error) {
@@ -359,7 +385,14 @@ func (s *Store) completeJobLocked(jobID, agentID string, results []protocol.Scan
 	if !ok {
 		return fmt.Errorf("job %s not found", jobID)
 	}
-	if job.Status == protocol.JobCompleted || job.Status == protocol.JobFailed {
+	if job.Status == protocol.JobCompleted || job.Status == protocol.JobFailed || job.Status == protocol.JobStopped {
+		ag := s.agents[agentID]
+		if ag.CurrentJobID == jobID {
+			ag.CurrentJobID = ""
+			ag.LastSeen = time.Now().UTC()
+			s.agents[agentID] = ag
+			_ = s.saveLocked()
+		}
 		return nil
 	}
 	if job.Status != protocol.JobInProgress {
@@ -395,7 +428,14 @@ func (s *Store) failJobAttemptLocked(jobID, agentID, agentErr string) error {
 	if !ok {
 		return fmt.Errorf("job %s not found", jobID)
 	}
-	if job.Status == protocol.JobCompleted || job.Status == protocol.JobFailed {
+	if job.Status == protocol.JobCompleted || job.Status == protocol.JobFailed || job.Status == protocol.JobStopped {
+		ag := s.agents[agentID]
+		if ag.CurrentJobID == jobID {
+			ag.CurrentJobID = ""
+			ag.LastSeen = time.Now().UTC()
+			s.agents[agentID] = ag
+			_ = s.saveLocked()
+		}
 		return nil
 	}
 	if job.Status != protocol.JobInProgress {
@@ -426,6 +466,58 @@ func (s *Store) failJobAttemptLocked(jobID, agentID, agentErr string) error {
 	}
 	s.agents[agentID] = ag
 
+	return s.saveLocked()
+}
+
+func (s *Store) stopJobLocked(jobID string) error {
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	parentID := jobID
+	if job.ParentJobID != "" {
+		parentID = job.ParentJobID
+	}
+	parent, ok := s.jobs[parentID]
+	if !ok {
+		return fmt.Errorf("parent job %s not found", parentID)
+	}
+
+	now := time.Now().UTC()
+	childIdx := s.childIndexLocked()
+	targetIDs := make([]string, 0, len(childIdx[parentID])+1)
+	if len(childIdx[parentID]) > 0 {
+		targetIDs = append(targetIDs, parentID)
+		targetIDs = append(targetIDs, childIdx[parentID]...)
+	} else {
+		targetIDs = append(targetIDs, jobID)
+	}
+
+	changed := false
+	for _, id := range targetIDs {
+		j, exists := s.jobs[id]
+		if !exists {
+			continue
+		}
+		if j.Status == protocol.JobCompleted || j.Status == protocol.JobFailed || j.Status == protocol.JobStopped {
+			continue
+		}
+		j.Status = protocol.JobStopped
+		j.LastError = "stopped by user"
+		j.LeaseExpiresAt = nil
+		j.AssignedTo = ""
+		j.UpdatedAt = now
+		s.jobs[id] = j
+		changed = true
+	}
+
+	// Keep parent timestamp/current status fresh for details/listing consumers.
+	parent.UpdatedAt = now
+	s.jobs[parentID] = parent
+
+	if !changed {
+		return nil
+	}
 	return s.saveLocked()
 }
 
@@ -1033,10 +1125,12 @@ func (s *Store) summarizeParentLocked(parent protocol.Job, childIDs []string) pr
 			item.SubJobsCompleted++
 		case protocol.JobFailed:
 			item.SubJobsFailed++
+		case protocol.JobStopped:
+			item.SubJobsStopped++
 		}
 	}
-	item.SubJobsTotal = item.SubJobsPending + item.SubJobsActive + item.SubJobsCompleted + item.SubJobsFailed
-	item.Status = statusFromCounts(item.SubJobsPending, item.SubJobsActive, item.SubJobsCompleted, item.SubJobsFailed)
+	item.SubJobsTotal = item.SubJobsPending + item.SubJobsActive + item.SubJobsCompleted + item.SubJobsFailed + item.SubJobsStopped
+	item.Status = statusFromCounts(item.SubJobsPending, item.SubJobsActive, item.SubJobsCompleted, item.SubJobsFailed, item.SubJobsStopped)
 	return item
 }
 
@@ -1059,6 +1153,7 @@ func summarizeStandaloneJob(job protocol.Job, results []protocol.ScanResult) pro
 		SubJobsActive:    btoi(job.Status == protocol.JobInProgress),
 		SubJobsCompleted: btoi(job.Status == protocol.JobCompleted),
 		SubJobsFailed:    btoi(job.Status == protocol.JobFailed),
+		SubJobsStopped:   btoi(job.Status == protocol.JobStopped),
 	}
 	return item
 }
@@ -1087,8 +1182,8 @@ func (s *Store) aggregateParentDetailsLocked(parent protocol.Job, childIDs []str
 	return aggJob, results
 }
 
-func statusFromCounts(pending, active, completed, failed int) protocol.JobStatus {
-	total := pending + active + completed + failed
+func statusFromCounts(pending, active, completed, failed, stopped int) protocol.JobStatus {
+	total := pending + active + completed + failed + stopped
 	if total == 0 {
 		return protocol.JobQueued
 	}
@@ -1097,6 +1192,9 @@ func statusFromCounts(pending, active, completed, failed int) protocol.JobStatus
 	}
 	if pending > 0 {
 		return protocol.JobQueued
+	}
+	if stopped > 0 && stopped+completed == total {
+		return protocol.JobStopped
 	}
 	if failed > 0 {
 		return protocol.JobFailed

@@ -105,18 +105,23 @@ func runSession(agentID, wsURL, heartbeatURL, clientKey string, allowRestrictedN
 		} else {
 			log.Printf("received %s attempt %d/%d: %s-%s ports %d-%d", job.ID, job.Attempts, job.MaxAttempts, job.StartIP, job.EndIP, job.StartPort, job.EndPort)
 		}
-		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, clientKey, agentID, job.ID, allowRestrictedNets, heartbeatInterval)
+		scanCtx, cancelScan := context.WithCancel(context.Background())
+		stopHeartbeat := startHeartbeat(heartbeatClient, heartbeatURL, clientKey, agentID, job.ID, allowRestrictedNets, heartbeatInterval, func(reason string) {
+			log.Printf("stop requested for %s: %s", job.ID, reason)
+			cancelScan()
+		})
 		scanCfg := scanner.Config{Timeout: 600 * time.Millisecond, Concurrency: 256}
 		var (
 			results []protocol.ScanResult
 			scanErr error
 		)
 		if len(job.Ports) > 0 {
-			results, scanErr = scanner.ScanPorts(job.StartIP, job.EndIP, job.Ports, scanCfg)
+			results, scanErr = scanner.ScanPortsContext(scanCtx, job.StartIP, job.EndIP, job.Ports, scanCfg)
 		} else {
-			results, scanErr = scanner.ScanRange(job.StartIP, job.EndIP, job.StartPort, job.EndPort, scanCfg)
+			results, scanErr = scanner.ScanRangeContext(scanCtx, job.StartIP, job.EndIP, job.StartPort, job.EndPort, scanCfg)
 		}
 		stopHeartbeat()
+		cancelScan()
 		if scanErr != nil {
 			*completion = &protocol.JobCompletion{JobID: job.ID, Error: scanErr.Error()}
 			log.Printf("scan failed for %s: %v", job.ID, scanErr)
@@ -129,9 +134,12 @@ func runSession(agentID, wsURL, heartbeatURL, clientKey string, allowRestrictedN
 	}
 }
 
-func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool, interval time.Duration) func() {
+func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool, interval time.Duration, onStop func(reason string)) func() {
 	if interval <= 0 || heartbeatURL == "" {
 		return func() {}
+	}
+	if onStop == nil {
+		onStop = func(string) {}
 	}
 
 	stopCh := make(chan struct{})
@@ -140,14 +148,14 @@ func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID
 		once.Do(func() { close(stopCh) })
 	}
 
-	sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets)
+	sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets, onStop)
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets)
+				sendHeartbeat(client, heartbeatURL, clientKey, agentID, jobID, allowRestrictedNets, onStop)
 			case <-stopCh:
 				return
 			}
@@ -156,7 +164,7 @@ func startHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID
 	return stop
 }
 
-func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool) {
+func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID string, allowRestrictedNets bool, onStop func(reason string)) {
 	reqBody, err := json.Marshal(protocol.HeartbeatRequest{
 		AgentID:             agentID,
 		CurrentJobID:        jobID,
@@ -180,9 +188,18 @@ func sendHeartbeat(client *http.Client, heartbeatURL, clientKey, agentID, jobID 
 		log.Printf("heartbeat post error: %v", err)
 		return
 	}
-	_ = resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("heartbeat rejected: %s", resp.Status)
+		return
+	}
+	var hbResp protocol.HeartbeatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&hbResp); err != nil {
+		log.Printf("heartbeat decode error: %v", err)
+		return
+	}
+	if hbResp.StopJob {
+		onStop(hbResp.Reason)
 	}
 }
 

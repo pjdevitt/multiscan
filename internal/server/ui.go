@@ -124,7 +124,8 @@ const dashboardHTML = `<!doctype html>
     .queued { color: #5e3d00; background: #fff3db; }
     .in_progress { color: #0a617a; background: #dbf2ff; }
     .completed { color: var(--ok); background: #dff8e7; }
-    .failed { color: var(--danger); background: #ffe4e8; }
+	    .failed { color: var(--danger); background: #ffe4e8; }
+	    .stopped { color: #7a3e00; background: #ffe8cc; }
     .busy { color: #0a617a; background: #dbf2ff; }
     .idle { color: var(--ok); background: #dff8e7; }
     .offline { color: #5a5f69; background: #e8ebf0; }
@@ -179,7 +180,7 @@ const dashboardHTML = `<!doctype html>
         <h2>Agents</h2>
         <table>
           <thead>
-            <tr>
+	          <tr>
               <th>Agent</th>
               <th>State</th>
               <th>Current Job</th>
@@ -207,9 +208,9 @@ const dashboardHTML = `<!doctype html>
             <th>Active</th>
             <th>Completed</th>
             <th>Updated (UTC)</th>
-            <th>Error</th>
-            <th>Results</th>
-          </tr>
+	            <th>Error</th>
+	            <th>Actions</th>
+	          </tr>
         </thead>
         <tbody id="jobs-body"></tbody>
       </table>
@@ -307,14 +308,15 @@ const dashboardHTML = `<!doctype html>
         .filter(Boolean);
     }
 
-    async function loadJobs() {
-      const res = await fetch('/api/jobs');
-      const data = await res.json();
-      const jobs = (data.jobs || []).slice().reverse();
-      jobsBody.innerHTML = jobs.map(function(j) {
-        return '<tr>' +
-          '<td>' + esc(j.id) + '</td>' +
-          '<td>' + badge(j.status, j.status) + '</td>' +
+	    async function loadJobs() {
+	      const res = await fetch('/api/jobs');
+	      const data = await res.json();
+	      const jobs = (data.jobs || []).slice().reverse();
+	      jobsBody.innerHTML = jobs.map(function(j) {
+	        const stopDisabled = j.status === 'completed' || j.status === 'failed' || j.status === 'stopped';
+	        return '<tr>' +
+	          '<td>' + esc(j.id) + '</td>' +
+	          '<td>' + badge(j.status, j.status) + '</td>' +
           '<td>' + esc(j.start_ip) + ' - ' + esc(j.end_ip) + '</td>' +
           '<td>' + portsLabel(j) + '</td>' +
           '<td>' + esc(j.open_port_count) + '</td>' +
@@ -323,19 +325,46 @@ const dashboardHTML = `<!doctype html>
           '<td>' + esc(j.sub_jobs_completed) + '</td>' +
           '<td>' + ts(j.updated_at) + '</td>' +
           '<td>' + esc(j.last_error || '-') + '</td>' +
-          '<td><button class="row-button" data-job-id="' + esc(j.id) + '">View</button></td>' +
-          '</tr>';
-      }).join('');
+	          '<td>' +
+	            '<button class="row-button" data-job-id="' + esc(j.id) + '">View</button> ' +
+	            '<button class="row-button" data-stop-job-id="' + esc(j.id) + '"' + (stopDisabled ? ' disabled style="opacity:.55;cursor:not-allowed;"' : '') + '>Stop</button>' +
+	          '</td>' +
+	          '</tr>';
+	      }).join('');
       if (!jobs.length) {
         jobsBody.innerHTML = '<tr><td colspan="11">No jobs yet.</td></tr>';
       }
 
-      jobsBody.querySelectorAll('button[data-job-id]').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-          selectedJobID = btn.getAttribute('data-job-id') || '';
-          loadResults(selectedJobID);
-        });
-      });
+	      jobsBody.querySelectorAll('button[data-job-id]').forEach(function(btn) {
+	        btn.addEventListener('click', function() {
+	          selectedJobID = btn.getAttribute('data-job-id') || '';
+	          loadResults(selectedJobID);
+	        });
+	      });
+	      jobsBody.querySelectorAll('button[data-stop-job-id]').forEach(function(btn) {
+	        btn.addEventListener('click', async function() {
+	          const id = btn.getAttribute('data-stop-job-id') || '';
+	          if (!id) return;
+	          btn.disabled = true;
+	          noticeEl.textContent = 'Stopping ' + id + '...';
+	          noticeEl.style.color = '#5f6670';
+	          const res = await fetch('/api/jobs/stop', {
+	            method: 'POST',
+	            headers: { 'Content-Type': 'application/json' },
+	            body: JSON.stringify({ job_id: id })
+	          });
+	          const body = await res.json();
+	          if (!res.ok) {
+	            noticeEl.textContent = body.error || ('Failed to stop ' + id);
+	            noticeEl.style.color = '#b42318';
+	            btn.disabled = false;
+	            return;
+	          }
+	          noticeEl.textContent = 'Stop requested for ' + id;
+	          noticeEl.style.color = '#067647';
+	          await refresh();
+	        });
+	      });
 
       if (selectedJobID) {
         const exists = jobs.some(function(j) { return j.id === selectedJobID; });

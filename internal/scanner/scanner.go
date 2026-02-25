@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -20,15 +22,28 @@ type Config struct {
 
 // ScanRange scans every (ip,port) pair in the provided inclusive ranges.
 func ScanRange(startIP, endIP string, startPort, endPort int, cfg Config) ([]protocol.ScanResult, error) {
+	return ScanRangeContext(context.Background(), startIP, endIP, startPort, endPort, cfg)
+}
+
+// ScanRangeContext scans every (ip,port) pair in the provided inclusive ranges.
+func ScanRangeContext(ctx context.Context, startIP, endIP string, startPort, endPort int, cfg Config) ([]protocol.ScanResult, error) {
 	ports := make([]int, 0, endPort-startPort+1)
 	for p := startPort; p <= endPort; p++ {
 		ports = append(ports, p)
 	}
-	return ScanPorts(startIP, endIP, ports, cfg)
+	return ScanPortsContext(ctx, startIP, endIP, ports, cfg)
 }
 
 // ScanPorts scans every (ip,port) pair for the provided port list.
 func ScanPorts(startIP, endIP string, ports []int, cfg Config) ([]protocol.ScanResult, error) {
+	return ScanPortsContext(context.Background(), startIP, endIP, ports, cfg)
+}
+
+// ScanPortsContext scans every (ip,port) pair for the provided port list.
+func ScanPortsContext(ctx context.Context, startIP, endIP string, ports []int, cfg Config) ([]protocol.ScanResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 700 * time.Millisecond
 	}
@@ -58,15 +73,27 @@ func ScanPorts(startIP, endIP string, ports []int, cfg Config) ([]protocol.ScanR
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range tasks {
-				endpoint := net.JoinHostPort(t.ip, fmt.Sprintf("%d", t.port))
-				conn, dialErr := net.DialTimeout("tcp", endpoint, cfg.Timeout)
-				if dialErr != nil {
-					results <- protocol.ScanResult{IP: t.ip, Port: t.port, Open: false, Err: dialErr.Error()}
-					continue
+			dialer := &net.Dialer{Timeout: cfg.Timeout}
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case t, ok := <-tasks:
+					if !ok {
+						return
+					}
+					endpoint := net.JoinHostPort(t.ip, fmt.Sprintf("%d", t.port))
+					conn, dialErr := dialer.DialContext(ctx, "tcp", endpoint)
+					if dialErr != nil {
+						if errors.Is(ctx.Err(), context.Canceled) {
+							return
+						}
+						results <- protocol.ScanResult{IP: t.ip, Port: t.port, Open: false, Err: dialErr.Error()}
+						continue
+					}
+					_ = conn.Close()
+					results <- protocol.ScanResult{IP: t.ip, Port: t.port, Open: true}
 				}
-				_ = conn.Close()
-				results <- protocol.ScanResult{IP: t.ip, Port: t.port, Open: true}
 			}
 		}()
 	}
@@ -74,7 +101,14 @@ func ScanPorts(startIP, endIP string, ports []int, cfg Config) ([]protocol.ScanR
 	go func() {
 		for _, ip := range ips {
 			for _, port := range ports {
-				tasks <- task{ip: ip, port: port}
+				select {
+				case <-ctx.Done():
+					close(tasks)
+					wg.Wait()
+					close(results)
+					return
+				case tasks <- task{ip: ip, port: port}:
+				}
 			}
 		}
 		close(tasks)
@@ -85,6 +119,9 @@ func ScanPorts(startIP, endIP string, ports []int, cfg Config) ([]protocol.ScanR
 	out := make([]protocol.ScanResult, 0, len(ips)*len(ports))
 	for r := range results {
 		out = append(out, r)
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err()
 	}
 
 	sort.Slice(out, func(i, j int) bool {

@@ -10,6 +10,59 @@ Use this file as a rolling, append-only handoff log for future Codex sessions.
 
 ---
 
+## Session: 2026-02-25 21:54 (UTC)
+
+### Objective
+- Add a UI "Stop" control that dequeues sub-jobs and stops agents currently running those sub-jobs.
+
+### Changes Implemented
+- Added `stopped` job status and propagated it through summaries/list rendering.
+- Implemented `Store.StopJob(jobID)` to stop parent jobs (and all child sub-jobs) or standalone jobs.
+- Added `POST /api/jobs/stop` endpoint for UI-initiated stop requests.
+- Extended heartbeat response with stop instructions (`stop_job`, `reason`) for in-flight agent jobs.
+- Added agent-side heartbeat handling to cancel active scans when stop is requested.
+- Added context-aware scanner APIs (`ScanPortsContext`, `ScanRangeContext`) and wired agent scans to cancellation.
+- Updated dashboard jobs table to include a `Stop` button per job row.
+
+### Files Touched
+- `/Users/pjdevitt/Development/MultiScan/internal/protocol/types.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/server/store.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/server/http.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/scanner/scanner.go`
+- `/Users/pjdevitt/Development/MultiScan/cmd/agent/main.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/server/ui.go`
+- `/Users/pjdevitt/Development/MultiScan/README.md`
+
+### Config / Env Changes
+- New env vars:
+  - none
+- Changed defaults:
+  - none
+
+### Validation
+- Commands run:
+  - `gofmt -w internal/protocol/types.go internal/server/store.go internal/server/http.go internal/scanner/scanner.go cmd/agent/main.go internal/server/ui.go`
+  - `go test ./...`
+- Result:
+  - pass (all packages compile; no test files present).
+
+### Migrations / Data Notes
+- No SQL schema changes required.
+- Persisted job status values now include `stopped`.
+
+### Risks / Caveats
+- Stop signal is delivered via heartbeat, so reaction time depends on `HEARTBEAT_INTERVAL`.
+- Agents that do not run this updated binary will not honor stop instructions mid-scan.
+
+### Next Suggested Steps
+1. Add server/agent compatibility guards (feature negotiation) for mixed-version clusters.
+2. Add tests for stop semantics: queued, in-progress, and late completion cases.
+
+### Open Questions
+- Whether stopped jobs should be resumable or permanently terminal.
+
+---
+
 ## Session: 2026-02-25 21:07 (UTC)
 
 ### Objective

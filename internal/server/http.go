@@ -50,6 +50,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("/heartbeat", a.handleHeartbeat)
 	mux.HandleFunc("/work/", a.handleWorkByID)
 	mux.HandleFunc("/api/jobs", a.handleAPIJobs)
+	mux.HandleFunc("/api/jobs/stop", a.handleAPIStopJob)
 	mux.HandleFunc("/api/agents", a.handleAPIAgents)
 	mux.HandleFunc("/", a.handleUI)
 	return loggingMiddleware(mux)
@@ -91,6 +92,33 @@ func (a *API) handleAPIAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	offlineAfter := 2 * a.syncMaxWait
 	writeJSON(w, http.StatusOK, map[string][]protocol.AgentStatus{"agents": a.store.ListAgents(offlineAfter)})
+}
+
+func (a *API) handleAPIStopJob(w http.ResponseWriter, r *http.Request) {
+	if !a.authorizeUIRequest(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	req.JobID = strings.TrimSpace(req.JobID)
+	if req.JobID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "job_id is required"})
+		return
+	}
+	if err := a.store.StopJob(req.JobID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (a *API) createJobFromRequest(w http.ResponseWriter, r *http.Request) {
@@ -170,7 +198,12 @@ func (a *API) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.store.Heartbeat(req.AgentID, strings.TrimSpace(req.CurrentJobID), req.AllowRestrictedNets)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	stopJob, reason := a.store.ShouldStopJob(strings.TrimSpace(req.CurrentJobID))
+	writeJSON(w, http.StatusOK, protocol.HeartbeatResponse{
+		Status:  "ok",
+		StopJob: stopJob,
+		Reason:  reason,
+	})
 }
 
 func (a *API) handleWS(w http.ResponseWriter, r *http.Request) {
