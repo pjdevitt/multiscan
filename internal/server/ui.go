@@ -216,10 +216,14 @@ const dashboardHTML = `<!doctype html>
       </table>
     </section>
 
-    <section class="panel" style="margin-top:16px;">
-      <h2>Scan Results</h2>
-      <p id="results-meta" class="meta">Select a job to view open ports ordered by IP then port.</p>
-      <table>
+	    <section class="panel" style="margin-top:16px;">
+	      <h2>Scan Results</h2>
+	      <label style="display:grid;gap:6px;margin-bottom:8px;font-size:13px;color:#5f6670;">
+	        Hide Filters (IPs and/or ports; separate with commas, spaces, or new lines)
+	        <textarea id="results-filter" rows="2" placeholder="22, 443, 127.0.0.1" style="border:1px solid #cfd5c2;border-radius:8px;padding:10px;font-size:14px;background:#fff;resize:vertical;"></textarea>
+	      </label>
+	      <p id="results-meta" class="meta">Select a job to view open ports ordered by IP then port.</p>
+	      <table>
         <thead>
           <tr>
             <th>IP</th>
@@ -234,10 +238,12 @@ const dashboardHTML = `<!doctype html>
   <script>
     const noticeEl = document.getElementById('notice');
     const jobsBody = document.getElementById('jobs-body');
-    const agentsBody = document.getElementById('agents-body');
-    const resultsBody = document.getElementById('results-body');
-    const resultsMeta = document.getElementById('results-meta');
-    let selectedJobID = '';
+	    const agentsBody = document.getElementById('agents-body');
+	    const resultsBody = document.getElementById('results-body');
+	    const resultsMeta = document.getElementById('results-meta');
+	    const resultsFilterEl = document.getElementById('results-filter');
+	    let selectedJobID = '';
+	    let currentResults = [];
 
     function esc(v) {
       return String(v || '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -301,12 +307,60 @@ const dashboardHTML = `<!doctype html>
       return { start: uint32ToIP(start), end: uint32ToIP(end) };
     }
 
-    function parseTargets(raw) {
-      return String(raw || '')
-        .split(/[\s,;]+/)
-        .map(function(t) { return t.trim(); })
-        .filter(Boolean);
-    }
+	    function parseTargets(raw) {
+	      return String(raw || '')
+	        .split(/[\s,;]+/)
+	        .map(function(t) { return t.trim(); })
+	        .filter(Boolean);
+	    }
+
+	    function parseResultFilterTokens(raw) {
+	      const tokens = String(raw || '')
+	        .split(/[\s,;]+/)
+	        .map(function(t) { return t.trim(); })
+	        .filter(Boolean);
+	      const hiddenIPs = new Set();
+	      const hiddenPorts = new Set();
+	      for (const token of tokens) {
+	        if (isIPv4(token)) {
+	          hiddenIPs.add(token);
+	          continue;
+	        }
+	        if (/^\d+$/.test(token)) {
+	          const p = Number(token);
+	          if (p >= 1 && p <= 65535) {
+	            hiddenPorts.add(p);
+	          }
+	        }
+	      }
+	      return { hiddenIPs: hiddenIPs, hiddenPorts: hiddenPorts };
+	    }
+
+	    function renderResults() {
+	      if (!selectedJobID) {
+	        resultsMeta.textContent = 'Select a job to view open ports ordered by IP then port.';
+	        resultsBody.innerHTML = '<tr><td colspan="2">No job selected.</td></tr>';
+	        return;
+	      }
+	      if (!currentResults.length) {
+	        resultsMeta.textContent = 'Job ' + selectedJobID + ': 0 open endpoint(s).';
+	        resultsBody.innerHTML = '<tr><td colspan="2">No open ports recorded for this job.</td></tr>';
+	        return;
+	      }
+	      const parsed = parseResultFilterTokens(resultsFilterEl.value);
+	      const filtered = currentResults.filter(function(r) {
+	        if (parsed.hiddenIPs.has(String(r.ip || ''))) return false;
+	        if (parsed.hiddenPorts.has(Number(r.port || 0))) return false;
+	        return true;
+	      });
+	      resultsMeta.textContent = 'Job ' + selectedJobID + ': ' + filtered.length + ' shown of ' + currentResults.length + ' open endpoint(s), ordered by IP then port.';
+	      resultsBody.innerHTML = filtered.map(function(r) {
+	        return '<tr><td>' + esc(r.ip) + '</td><td>' + esc(r.port) + '</td></tr>';
+	      }).join('');
+	      if (!filtered.length) {
+	        resultsBody.innerHTML = '<tr><td colspan="2">No open ports match current filters.</td></tr>';
+	      }
+	    }
 
 	    async function loadJobs() {
 	      const res = await fetch('/api/jobs');
@@ -395,30 +449,25 @@ const dashboardHTML = `<!doctype html>
       if (!agents.length) agentsBody.innerHTML = '<tr><td colspan="6">No agents reported yet.</td></tr>';
     }
 
-    async function loadResults(jobID) {
-      if (!jobID) {
-        resultsMeta.textContent = 'Select a job to view open ports ordered by IP then port.';
-        resultsBody.innerHTML = '<tr><td colspan="2">No job selected.</td></tr>';
-        return;
-      }
+	    async function loadResults(jobID) {
+	      if (!jobID) {
+	        currentResults = [];
+	        renderResults();
+	        return;
+	      }
 
       const res = await fetch('/work/' + encodeURIComponent(jobID));
-      const body = await res.json();
-      if (!res.ok) {
-        resultsMeta.textContent = 'Failed to load results for ' + jobID;
-        resultsBody.innerHTML = '<tr><td colspan="2">' + esc(body.error || 'Request failed') + '</td></tr>';
-        return;
-      }
+	      const body = await res.json();
+	      if (!res.ok) {
+	        currentResults = [];
+	        resultsMeta.textContent = 'Failed to load results for ' + jobID;
+	        resultsBody.innerHTML = '<tr><td colspan="2">' + esc(body.error || 'Request failed') + '</td></tr>';
+	        return;
+	      }
 
-      const results = body.results || [];
-      resultsMeta.textContent = 'Job ' + jobID + ': ' + results.length + ' open endpoint(s), ordered by IP then port.';
-      resultsBody.innerHTML = results.map(function(r) {
-        return '<tr><td>' + esc(r.ip) + '</td><td>' + esc(r.port) + '</td></tr>';
-      }).join('');
-      if (!results.length) {
-        resultsBody.innerHTML = '<tr><td colspan="2">No open ports recorded for this job.</td></tr>';
-      }
-    }
+	      currentResults = body.results || [];
+	      renderResults();
+	    }
 
     async function refresh() {
       try {
@@ -499,8 +548,11 @@ const dashboardHTML = `<!doctype html>
       await refresh();
     });
 
-    resultsBody.innerHTML = '<tr><td colspan="2">No job selected.</td></tr>';
-    refresh();
+	    resultsBody.innerHTML = '<tr><td colspan="2">No job selected.</td></tr>';
+	    resultsFilterEl.addEventListener('input', function() {
+	      renderResults();
+	    });
+	    refresh();
     setInterval(refresh, 5000);
   </script>
 </body>

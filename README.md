@@ -194,7 +194,7 @@ curl -s http://localhost:8080/work/job-0001
 Build image:
 
 ```bash
-docker build -t multiscan-server:latest .
+docker build -f Dockerfile.server -t multiscan-server:latest .
 ```
 
 Run server with persistent state on mounted volume:
@@ -233,6 +233,30 @@ Notes:
 - Container embeds SQLite via a compiled Go dependency; no `sqlite3` binary is required at runtime.
 - If `REQUIRED_CLIENT_KEY` is set, agents must provide matching `CLIENT_KEY`.
 - If `UI_BASIC_AUTH_USER` and `UI_BASIC_AUTH_PASS` are set, browser UI access requires basic auth credentials.
+
+## Docker (Agent)
+
+Build image:
+
+```bash
+docker build -f Dockerfile.agent -t multiscan-agent:latest .
+```
+
+Run agent against a server reachable at `http://multiscan-server:8080`:
+
+```bash
+docker run -d --name multiscan-agent \
+  -e AGENT_ID=agent-1 \
+  -e SERVER_URL=http://multiscan-server:8080 \
+  -e CLIENT_KEY=change-me \
+  multiscan-agent:latest
+```
+
+Notes:
+
+- If server auth is disabled, omit `CLIENT_KEY`.
+- Override `WS_URL` and `HEARTBEAT_URL` when you need explicit endpoints.
+- Use `ALLOW_RESTRICTED_NET_SCANS=true` only for trusted agents that should receive restricted-network jobs.
 
 ## API summary
 

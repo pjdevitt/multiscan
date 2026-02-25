@@ -10,6 +10,88 @@ Use this file as a rolling, append-only handoff log for future Codex sessions.
 
 ---
 
+## Session: 2026-02-25 23:01 (UTC)
+
+### Objective
+- Add a dedicated Dockerfile for the agent to simplify deployment.
+
+### Changes Implemented
+- Added `Dockerfile.agent` with a multi-stage build for `cmd/agent`.
+- Added README section with `Docker (Agent)` build/run examples and env notes.
+
+### Files Touched
+- `/Users/pjdevitt/Development/MultiScan/Dockerfile.agent`
+- `/Users/pjdevitt/Development/MultiScan/README.md`
+
+### Config / Env Changes
+- New env vars:
+  - none
+- Changed defaults:
+  - none
+
+### Validation
+- Commands run:
+  - `go test ./...`
+- Result:
+  - pass (all packages compile; no test files present).
+
+### Migrations / Data Notes
+- None.
+
+### Risks / Caveats
+- The image defaults `SERVER_URL` to `http://multiscan-server:8080`; deployment must provide a reachable server endpoint.
+
+### Next Suggested Steps
+1. Add docker-compose examples for server+agent with shared network and env wiring.
+2. Publish versioned tags for server and agent images in CI.
+
+### Open Questions
+- None.
+
+---
+
+## Session: 2026-02-25 22:03 (UTC)
+
+### Objective
+- Add a UI input for hiding selected ports and/or IP addresses from the scan results table.
+
+### Changes Implemented
+- Added `Hide Filters` textarea to the Scan Results panel.
+- Implemented client-side filter parsing for IP and port tokens (comma/space/newline/semicolon separated).
+- Added live re-rendering of results table when filter input changes.
+- Updated results metadata to show `shown` count vs total open endpoints.
+
+### Files Touched
+- `/Users/pjdevitt/Development/MultiScan/internal/server/ui.go`
+
+### Config / Env Changes
+- New env vars:
+  - none
+- Changed defaults:
+  - none
+
+### Validation
+- Commands run:
+  - `go test ./...`
+- Result:
+  - pass (all packages compile; no test files present).
+
+### Migrations / Data Notes
+- No DB/API changes.
+
+### Risks / Caveats
+- Filtering is UI-only and does not change persisted results.
+- Filter tokens currently support exact IPv4 and exact port numbers only.
+
+### Next Suggested Steps
+1. Persist filter text in browser local storage.
+2. Extend filters with CIDR/IP-prefix and port-range support.
+
+### Open Questions
+- Whether filters should also apply to exported/downloaded result payloads.
+
+---
+
 ## Session: 2026-02-25 21:54 (UTC)
 
 ### Objective

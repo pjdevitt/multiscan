@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.24-alpine AS builder
+WORKDIR /src
+
+COPY go.mod ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/multiscan-agent ./cmd/agent
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+COPY --from=builder /out/multiscan-agent /usr/local/bin/multiscan-agent
+
+ENV AGENT_ID=agent-1 \
+    SERVER_URL=http://multiscan-server:8080 \
+    ALLOW_RESTRICTED_NET_SCANS=false \
+    HEARTBEAT_INTERVAL=5s \
+    WS_READ_TIMEOUT=40s \
+    WS_WRITE_TIMEOUT=10s \
+    RETRY_DELAY=2s
+
+ENTRYPOINT ["/usr/local/bin/multiscan-agent"]
