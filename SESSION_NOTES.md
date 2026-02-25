@@ -10,6 +10,54 @@ Use this file as a rolling, append-only handoff log for future Codex sessions.
 
 ---
 
+## Session: 2026-02-25 20:29 (UTC)
+
+### Objective
+- Add support for submitting a single hostname target and have the server resolve it to an IPv4 address.
+
+### Changes Implemented
+- Added optional `hostname` field to `SubmitJobRequest`.
+- Updated job request normalization to resolve `hostname` via DNS and set `start_ip=end_ip=<resolved IPv4>`.
+- Updated API error handling to return `400` when hostname resolution fails or no target is provided.
+- Updated dashboard form payload to include `hostname` input.
+- Added README example for hostname-based job submission.
+
+### Files Touched
+- `/Users/pjdevitt/Development/MultiScan/internal/protocol/types.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/server/http.go`
+- `/Users/pjdevitt/Development/MultiScan/internal/server/ui.go`
+- `/Users/pjdevitt/Development/MultiScan/README.md`
+
+### Config / Env Changes
+- New env vars:
+  - none
+- Changed defaults:
+  - none
+
+### Validation
+- Commands run:
+  - `gofmt -w internal/server/http.go internal/server/ui.go internal/protocol/types.go`
+  - `go test ./...`
+- Result:
+  - pass (all packages compile; no test files present).
+
+### Migrations / Data Notes
+- No DB schema changes.
+- Existing API payloads using `start_ip`/`end_ip` continue to work.
+
+### Risks / Caveats
+- Hostname resolution uses runtime DNS and currently selects the first IPv4 result returned.
+- If a hostname only resolves to IPv6, the API returns a validation-style error.
+
+### Next Suggested Steps
+1. Add unit tests for `normalizeSubmitRequest` hostname success/failure behavior.
+2. Optionally store original hostname in job metadata for UI auditability.
+
+### Open Questions
+- None.
+
+---
+
 ## Session: 2026-02-24 11:33 (UTC)
 
 ### Objective

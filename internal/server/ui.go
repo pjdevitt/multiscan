@@ -149,11 +149,14 @@ const dashboardHTML = `<!doctype html>
       <section class="panel">
         <h2>Create Job</h2>
         <form id="job-form">
+          <label>Hostname (single target, optional)
+            <input name="hostname" placeholder="scanme.nmap.org" />
+          </label>
           <label>Start IP
-            <input name="start_ip" value="127.0.0.1" required />
+            <input name="start_ip" value="127.0.0.1" />
           </label>
           <label>End IP
-            <input name="end_ip" value="127.0.0.1" required />
+            <input name="end_ip" value="127.0.0.1" />
           </label>
           <label>Start Port
             <input name="start_port" type="number" value="20" min="1" max="65535" required />
@@ -365,6 +368,7 @@ const dashboardHTML = `<!doctype html>
       e.preventDefault();
       const fd = new FormData(e.target);
       const payload = {
+        hostname: String(fd.get('hostname') || '').trim(),
         start_ip: String(fd.get('start_ip') || '').trim(),
         end_ip: String(fd.get('end_ip') || '').trim(),
         start_port: Number(fd.get('start_port')),

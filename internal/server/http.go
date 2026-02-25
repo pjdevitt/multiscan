@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -98,7 +99,11 @@ func (a *API) createJobFromRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	req = normalizeSubmitRequest(req)
+	req, err := normalizeSubmitRequest(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := validateJobRequest(req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -271,6 +276,9 @@ func (a *API) handleWorkByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateJobRequest(req protocol.SubmitJobRequest) error {
+	if strings.TrimSpace(req.StartIP) == "" || strings.TrimSpace(req.EndIP) == "" {
+		return errors.New("provide hostname or both start_ip and end_ip")
+	}
 	if !ipv4Pattern.MatchString(req.StartIP) || !ipv4Pattern.MatchString(req.EndIP) {
 		return errors.New("start_ip and end_ip must be valid IPv4 addresses")
 	}
@@ -294,7 +302,20 @@ func validateJobRequest(req protocol.SubmitJobRequest) error {
 	return nil
 }
 
-func normalizeSubmitRequest(req protocol.SubmitJobRequest) protocol.SubmitJobRequest {
+func normalizeSubmitRequest(req protocol.SubmitJobRequest) (protocol.SubmitJobRequest, error) {
+	req.Hostname = strings.TrimSpace(req.Hostname)
+	req.StartIP = strings.TrimSpace(req.StartIP)
+	req.EndIP = strings.TrimSpace(req.EndIP)
+
+	if req.Hostname != "" {
+		ip, err := resolveHostnameIPv4(req.Hostname)
+		if err != nil {
+			return req, err
+		}
+		req.StartIP = ip
+		req.EndIP = ip
+	}
+
 	if req.Top1000 && req.TopN == 0 {
 		req.TopN = 1000
 	}
@@ -317,7 +338,20 @@ func normalizeSubmitRequest(req protocol.SubmitJobRequest) protocol.SubmitJobReq
 		req.StartPort = dedup[0]
 		req.EndPort = dedup[len(dedup)-1]
 	}
-	return req
+	return req, nil
+}
+
+func resolveHostnameIPv4(hostname string) (string, error) {
+	ips, err := net.LookupIP(hostname)
+	if err != nil {
+		return "", errors.New("failed to resolve hostname: " + hostname)
+	}
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String(), nil
+		}
+	}
+	return "", errors.New("hostname did not resolve to an IPv4 address: " + hostname)
 }
 
 func (a *API) authorizeAgentRequest(r *http.Request) bool {

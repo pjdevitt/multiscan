@@ -14,6 +14,7 @@ const (
 
 // SubmitJobRequest is sent to the controller to enqueue scan work.
 type SubmitJobRequest struct {
+	Hostname    string `json:"hostname,omitempty"`
 	StartIP     string `json:"start_ip"`
 	EndIP       string `json:"end_ip"`
 	StartPort   int    `json:"start_port"`

@@ -141,6 +141,19 @@ curl -s -X POST http://localhost:8080/jobs \
     "start_port":20,
     "end_port":1024,
     "max_attempts":4
+	  }'
+```
+
+Single-hostname mode (server resolves hostname to one IPv4 target):
+
+```bash
+curl -s -X POST http://localhost:8080/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "hostname":"scanme.nmap.org",
+    "start_port":20,
+    "end_port":1024,
+    "max_attempts":3
   }'
 ```
 
